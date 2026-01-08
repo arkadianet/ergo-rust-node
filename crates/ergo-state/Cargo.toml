@@ -1,0 +1,49 @@
+[package]
+name = "ergo-state"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "State management for Ergo Rust Node - UTXO state, AVL+ tree, history"
+
+[dependencies]
+# Internal crates
+ergo-storage.workspace = true
+ergo-consensus.workspace = true
+
+# sigma-rust
+ergo-lib.workspace = true
+ergo-chain-types.workspace = true
+ergotree-interpreter.workspace = true
+sigma-ser.workspace = true
+ergo_avltree_rust.workspace = true
+
+# Async
+tokio.workspace = true
+async-trait.workspace = true
+
+# Serialization
+serde.workspace = true
+bincode.workspace = true
+
+# Error handling
+thiserror.workspace = true
+anyhow.workspace = true
+
+# Logging
+tracing.workspace = true
+
+# Utilities
+bytes.workspace = true
+hex.workspace = true
+parking_lot.workspace = true
+dashmap.workspace = true
+
+# Cryptography
+blake2.workspace = true
+
+# Math
+num-bigint.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { workspace = true, features = ["test-util"] }

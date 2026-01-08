@@ -1,0 +1,33 @@
+# Rust
+/target/
+Cargo.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Node data
+.ergo/
+.ergo-testnet/
+wallet/
+
+# Logs
+*.log
+logs/
+
+# Secrets
+secret.json
+*.key
+*.pem
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+*.so
+*.dylib
+*.dll

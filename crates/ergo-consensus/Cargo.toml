@@ -1,0 +1,42 @@
+[package]
+name = "ergo-consensus"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Consensus rules for Ergo Rust Node - Autolykos PoW, difficulty adjustment, block validation"
+
+[dependencies]
+# Internal crates
+ergo-storage.workspace = true
+
+# sigma-rust
+ergo-lib.workspace = true
+ergo-chain-types.workspace = true
+ergotree-interpreter.workspace = true
+sigma-ser.workspace = true
+ergo-merkle-tree.workspace = true
+
+# Cryptography
+blake2.workspace = true
+k256.workspace = true
+sha2.workspace = true
+typenum.workspace = true
+digest.workspace = true
+
+# Serialization
+serde.workspace = true
+
+# Error handling
+thiserror.workspace = true
+anyhow.workspace = true
+
+# Logging
+tracing.workspace = true
+
+# Utilities
+num-bigint.workspace = true
+bytes.workspace = true
+hex.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

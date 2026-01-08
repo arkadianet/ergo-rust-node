@@ -1,0 +1,37 @@
+[package]
+name = "ergo-mempool"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Transaction mempool for Ergo Rust Node - fee ordering, validation, eviction"
+
+[dependencies]
+# Internal crates
+ergo-consensus.workspace = true
+ergo-state.workspace = true
+
+# sigma-rust
+ergo-lib.workspace = true
+ergotree-interpreter.workspace = true
+
+# Async
+tokio.workspace = true
+async-trait.workspace = true
+
+# Serialization
+serde.workspace = true
+
+# Error handling
+thiserror.workspace = true
+
+# Logging
+tracing.workspace = true
+
+# Utilities
+parking_lot.workspace = true
+dashmap.workspace = true
+bytes.workspace = true
+hex.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

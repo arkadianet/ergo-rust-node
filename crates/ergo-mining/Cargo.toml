@@ -1,0 +1,40 @@
+[package]
+name = "ergo-mining"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Mining support for Ergo Rust Node - block candidate generation, stratum protocol"
+
+[dependencies]
+# Internal crates
+ergo-state.workspace = true
+ergo-mempool.workspace = true
+ergo-consensus.workspace = true
+
+# sigma-rust
+ergo-lib.workspace = true
+ergo-chain-types.workspace = true
+
+# Async
+tokio.workspace = true
+async-trait.workspace = true
+
+# Serialization
+serde.workspace = true
+
+# Error handling
+thiserror.workspace = true
+
+# Logging
+tracing.workspace = true
+
+# Utilities
+parking_lot.workspace = true
+hex.workspace = true
+rand.workspace = true
+blake2.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+ergo-storage.workspace = true
+tempfile = "3"

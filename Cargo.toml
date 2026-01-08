@@ -1,0 +1,110 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/ergo-node",
+    "crates/ergo-consensus",
+    "crates/ergo-state",
+    "crates/ergo-mempool",
+    "crates/ergo-network",
+    "crates/ergo-sync",
+    "crates/ergo-storage",
+    "crates/ergo-api",
+    "crates/ergo-mining",
+    "crates/ergo-wallet",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "Apache-2.0"
+repository = "https://github.com/ergoplatform/ergo-rust-node"
+
+[workspace.dependencies]
+# Internal crates
+ergo-node = { path = "crates/ergo-node" }
+ergo-consensus = { path = "crates/ergo-consensus" }
+ergo-state = { path = "crates/ergo-state" }
+ergo-mempool = { path = "crates/ergo-mempool" }
+ergo-network = { path = "crates/ergo-network" }
+ergo-sync = { path = "crates/ergo-sync" }
+ergo-storage = { path = "crates/ergo-storage" }
+ergo-api = { path = "crates/ergo-api" }
+ergo-mining = { path = "crates/ergo-mining" }
+ergo-wallet = { path = "crates/ergo-wallet" }
+
+# sigma-rust dependencies
+ergo-lib = "0.28"
+ergotree-interpreter = "0.28"
+ergo-chain-types = "0.15"
+sigma-ser = "0.19"
+ergo-nipopow = "0.15"
+ergo-merkle-tree = "0.15"
+ergo_avltree_rust = "0.1"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+futures = "0.3"
+async-trait = "0.1"
+
+# Storage
+rocksdb = "0.24"
+
+# Networking
+tower = { version = "0.4", features = ["full"] }
+
+# API
+axum = { version = "0.7", features = ["macros"] }
+tower-http = { version = "0.5", features = ["cors", "trace", "compression-gzip"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+bincode = "1"
+
+# Cryptography
+blake2 = "0.10"
+k256 = { version = "0.13", features = ["ecdsa"] }
+sha2 = "0.10"
+rand = "0.8"
+typenum = "1.17"
+digest = "0.10"
+
+# Logging and diagnostics
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Error handling
+thiserror = "1"
+anyhow = "1"
+
+# CLI and config
+clap = { version = "4", features = ["derive"] }
+toml = "0.8"
+config = "0.14"
+
+# Utilities
+bytes = "1"
+hex = "0.4"
+base64 = "0.22"
+parking_lot = "0.12"
+dashmap = "5"
+num-bigint = "0.4"
+once_cell = "1"
+derive_more = "0.99"
+
+# Testing
+proptest = "1"
+criterion = "0.5"
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3

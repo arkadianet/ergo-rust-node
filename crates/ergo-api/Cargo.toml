@@ -1,0 +1,44 @@
+[package]
+name = "ergo-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "REST API for Ergo Rust Node - endpoints matching Scala node API"
+
+[dependencies]
+# Internal crates
+ergo-state.workspace = true
+ergo-mempool.workspace = true
+ergo-network.workspace = true
+ergo-consensus.workspace = true
+ergo-mining.workspace = true
+ergo-wallet.workspace = true
+
+# sigma-rust
+ergo-lib.workspace = true
+ergo-chain-types.workspace = true
+
+# Async
+tokio.workspace = true
+async-trait.workspace = true
+
+# API framework
+axum.workspace = true
+tower-http.workspace = true
+tower.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+
+# Error handling
+thiserror.workspace = true
+
+# Logging
+tracing.workspace = true
+
+# Utilities
+hex.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

@@ -1,0 +1,46 @@
+[package]
+name = "ergo-network"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "P2P networking for Ergo Rust Node - peer management, message handling"
+
+[dependencies]
+# sigma-rust
+ergo-chain-types.workspace = true
+sigma-ser.workspace = true
+
+# Async
+tokio.workspace = true
+tokio-util.workspace = true
+futures.workspace = true
+async-trait.workspace = true
+
+# Networking
+tower.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+bincode.workspace = true
+
+# Error handling
+thiserror.workspace = true
+anyhow.workspace = true
+
+# Logging
+tracing.workspace = true
+
+# Cryptography
+blake2.workspace = true
+typenum.workspace = true
+
+# Utilities
+bytes.workspace = true
+hex.workspace = true
+parking_lot.workspace = true
+dashmap.workspace = true
+rand.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

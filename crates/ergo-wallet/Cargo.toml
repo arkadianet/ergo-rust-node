@@ -1,0 +1,45 @@
+[package]
+name = "ergo-wallet"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Wallet functionality for Ergo Rust Node - HD wallet, transaction building"
+
+[dependencies]
+# Internal crates
+ergo-state.workspace = true
+
+# sigma-rust
+ergo-lib.workspace = true
+ergo-chain-types.workspace = true
+ergotree-interpreter.workspace = true
+
+# Async
+tokio.workspace = true
+async-trait.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+
+# Cryptography
+k256.workspace = true
+sha2.workspace = true
+rand.workspace = true
+aes-gcm = "0.10"
+argon2 = "0.5"
+
+# Error handling
+thiserror.workspace = true
+
+# Logging
+tracing.workspace = true
+
+# Utilities
+parking_lot.workspace = true
+hex.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+ergo-storage.workspace = true
+tempfile = "3"

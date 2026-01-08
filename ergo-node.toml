@@ -1,0 +1,62 @@
+# Ergo Rust Node Configuration
+# See docs/IMPLEMENTATION_PLAN.md for details
+
+# Node identification
+node_name = "ergo-rust-node"
+
+# Network: "mainnet" or "testnet"
+network = "mainnet"
+
+# Data directory for blockchain data
+data_dir = ".ergo"
+
+# State type: "utxo" (full) or "digest" (stateless)
+state_type = "utxo"
+
+[network_config]
+# P2P network bind address
+bind_address = "0.0.0.0:9030"
+
+# Declared public address (optional, for NAT traversal)
+# declared_address = "1.2.3.4:9030"
+
+# Known peers for initial connection
+known_peers = [
+    "192.168.1.137:9033",
+]
+
+# Maximum total connections
+max_connections = 30
+
+# Maximum outbound connections
+max_outbound = 10
+
+[api]
+# API server bind address
+bind_address = "127.0.0.1:9053"
+
+# API key for protected endpoints (optional)
+# api_key = "your-secret-api-key"
+
+# Allow public access to API
+public = false
+
+[mining]
+# Enable mining
+enabled = false
+
+# Use external miner (stratum protocol)
+external = true
+
+# Mining reward address
+# reward_address = "9f..."
+
+[wallet]
+# Enable integrated wallet
+enabled = false
+
+# Wallet data subdirectory
+data_dir = "wallet"
+
+# Secret storage file
+secret_file = "secret.json"

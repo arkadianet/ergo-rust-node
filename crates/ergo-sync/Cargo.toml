@@ -1,0 +1,35 @@
+[package]
+name = "ergo-sync"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Block synchronization for Ergo Rust Node - header-first sync, block download"
+
+[dependencies]
+# Internal crates
+ergo-network.workspace = true
+ergo-state.workspace = true
+ergo-consensus.workspace = true
+
+# sigma-rust
+ergo-chain-types.workspace = true
+sigma-ser.workspace = true
+
+# Async
+tokio = { workspace = true, features = ["sync"] }
+futures.workspace = true
+async-trait.workspace = true
+
+# Error handling
+thiserror.workspace = true
+
+# Logging
+tracing.workspace = true
+
+# Utilities
+parking_lot.workspace = true
+dashmap.workspace = true
+hex.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
