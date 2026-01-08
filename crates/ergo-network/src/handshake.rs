@@ -1005,6 +1005,24 @@ impl PeerSpec {
     }
 }
 
+impl fmt::Display for PeerSpec {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(ref addr) = self.declared_addr {
+            write!(
+                f,
+                "{}@{}:{} (v{}.{}.{})",
+                self.peer_name, addr.ip, addr.port, self.version.0, self.version.1, self.version.2
+            )
+        } else {
+            write!(
+                f,
+                "{} (v{}.{}.{})",
+                self.peer_name, self.version.0, self.version.1, self.version.2
+            )
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1092,5 +1110,63 @@ mod tests {
         } else {
             panic!("Expected Session feature");
         }
+    }
+
+    #[test]
+    fn test_peer_spec_roundtrip() {
+        let peer_spec = PeerSpec::new(
+            "ergo-rust-node".to_string(),
+            (6, 0, 1),
+            "test-node".to_string(),
+            Some(DeclaredAddress {
+                ip: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)),
+                port: 9030,
+            }),
+        );
+
+        let serialized = peer_spec.serialize();
+        let (parsed, _) = PeerSpec::parse(&serialized, 0).unwrap();
+
+        assert_eq!(parsed.agent_name, "ergo-rust-node");
+        assert_eq!(parsed.version, (6, 0, 1));
+        assert_eq!(parsed.peer_name, "test-node");
+        assert!(parsed.declared_addr.is_some());
+        let addr = parsed.declared_addr.unwrap();
+        assert_eq!(addr.ip.to_string(), "192.168.1.1");
+        assert_eq!(addr.port, 9030);
+    }
+
+    #[test]
+    fn test_peer_spec_from_handshake() {
+        let handshake = HandshakeData::new(
+            "ergo-rust-node".to_string(),
+            (6, 0, 1),
+            "test-node".to_string(),
+        );
+
+        let peer_spec = PeerSpec::from_handshake(&handshake);
+
+        assert_eq!(peer_spec.agent_name, handshake.agent_name);
+        assert_eq!(peer_spec.version, handshake.version);
+        assert_eq!(peer_spec.peer_name, handshake.peer_name);
+    }
+
+    #[test]
+    fn test_peer_spec_display() {
+        let peer_spec = PeerSpec::new(
+            "ergo-rust-node".to_string(),
+            (6, 0, 1),
+            "test-node".to_string(),
+            Some(DeclaredAddress {
+                ip: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)),
+                port: 9030,
+            }),
+        );
+
+        let display = format!("{}", peer_spec);
+        assert!(display.contains("test-node"));
+        assert!(display.contains("192.168.1.1"));
+        assert!(display.contains("9030"));
+        assert!(display.contains("6.0.1"));
     }
 }

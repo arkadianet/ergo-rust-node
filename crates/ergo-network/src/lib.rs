@@ -19,7 +19,7 @@ mod service;
 pub use codec::{MessageCodec, PeerAddress, PeerFeature};
 pub use connection::{Connection, ConnectionConfig};
 pub use error::{NetworkError, NetworkResult};
-pub use handshake::{HandshakeCodec, HandshakeData};
+pub use handshake::{DeclaredAddress, HandshakeCodec, HandshakeData, PeerSpec};
 pub use message::{
     Handshake, InvData, Message, MessageType, ModifierData, ModifierItem, ModifierRequest, SyncInfo,
 };

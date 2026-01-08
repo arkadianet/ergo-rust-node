@@ -7,8 +7,8 @@ use ergo_consensus::block::{BlockId, BlockTransactions, Digest32, Extension, Ful
 use ergo_mempool::Mempool;
 use ergo_mining::{CandidateGenerator, Miner, MinerConfig};
 use ergo_network::{
-    Message, NetworkCommand, NetworkConfig, NetworkEvent, NetworkService, PeerId, PeerManager,
-    MAINNET_MAGIC, TESTNET_MAGIC,
+    DeclaredAddress, Handshake, Message, NetworkCommand, NetworkConfig, NetworkEvent,
+    NetworkService, PeerId, PeerManager, PeerSpec, MAINNET_MAGIC, TESTNET_MAGIC,
 };
 use ergo_state::{StateChange, StateManager};
 use ergo_storage::Database;
@@ -364,6 +364,8 @@ impl Node {
 
         // Track peer addresses for reconnection
         let mut peer_addresses: HashMap<PeerId, SocketAddr> = HashMap::new();
+        // Track peer handshakes for GetPeers response
+        let mut peer_handshakes: HashMap<PeerId, Handshake> = HashMap::new();
         // Track peers we want to reconnect to
         let mut reconnect_queue: HashMap<SocketAddr, ReconnectInfo> = HashMap::new();
         // Desired minimum number of connections
@@ -426,6 +428,8 @@ impl Node {
 
                                 // Track the peer's address for potential reconnection later
                                 peer_addresses.insert(peer_id.clone(), addr);
+                                // Store handshake for GetPeers response
+                                peer_handshakes.insert(peer_id.clone(), handshake);
 
                                 // Remove from reconnect queue on successful connection
                                 if let Some(info) = reconnect_queue.get_mut(&addr) {
@@ -448,6 +452,8 @@ impl Node {
                                         reconnect_queue.insert(addr, ReconnectInfo::new(addr));
                                     }
                                 }
+                                // Remove handshake data
+                                peer_handshakes.remove(&peer_id);
 
                                 let _ = sync_event_tx_clone.send(SyncEvent::PeerDisconnected {
                                     peer: peer_id,
@@ -461,6 +467,7 @@ impl Node {
                                     &mempool,
                                     &sync_event_tx_clone,
                                     &peer_addresses,
+                                    &peer_handshakes,
                                     &network_cmd_tx_for_router,
                                 ).await;
                             }
@@ -603,6 +610,7 @@ impl Node {
         _mempool: &Arc<Mempool>,
         sync_event_tx: &mpsc::Sender<SyncEvent>,
         peer_addresses: &HashMap<PeerId, SocketAddr>,
+        peer_handshakes: &HashMap<PeerId, Handshake>,
         network_cmd_tx: &mpsc::Sender<NetworkCommand>,
     ) {
         match message {
@@ -645,17 +653,31 @@ impl Node {
             Message::GetPeers => {
                 debug!(peer = %peer_id, "GetPeers request - sending known peers");
 
-                // Collect peer addresses to share (excluding the requesting peer)
-                let peer_addrs: Vec<String> = peer_addresses
+                // Build PeerSpec list from connected peers (excluding the requesting peer)
+                let peer_specs: Vec<PeerSpec> = peer_addresses
                     .iter()
                     .filter(|(id, _)| *id != peer_id)
-                    .map(|(_, addr)| addr.to_string())
+                    .filter_map(|(id, addr)| {
+                        peer_handshakes.get(id).map(|handshake| {
+                            // Convert Handshake to PeerSpec with declared address from socket
+                            let declared_addr = Some(DeclaredAddress {
+                                ip: addr.ip(),
+                                port: addr.port(),
+                            });
+                            PeerSpec::new(
+                                handshake.agent_name.clone(),
+                                handshake.version,
+                                handshake.node_name.clone(),
+                                declared_addr,
+                            )
+                        })
+                    })
                     .take(20) // Limit to 20 peers
                     .collect();
 
-                if !peer_addrs.is_empty() {
-                    info!(peer = %peer_id, count = peer_addrs.len(), "Responding with peers");
-                    let response = Message::Peers(peer_addrs);
+                if !peer_specs.is_empty() {
+                    info!(peer = %peer_id, count = peer_specs.len(), "Responding with peers");
+                    let response = Message::Peers(peer_specs);
                     let _ = network_cmd_tx
                         .send(NetworkCommand::SendMessage {
                             peer_id: peer_id.clone(),
@@ -667,10 +689,10 @@ impl Node {
                 }
             }
             Message::Peers(peers) => {
-                debug!(peer = %peer_id, count = peers.len(), "Peers received");
+                info!(peer = %peer_id, count = peers.len(), "Peers received");
                 // Log the received peers - they can be used for future connections
-                for peer_addr in &peers {
-                    debug!(peer_addr = %peer_addr, "Received peer address");
+                for peer_spec in &peers {
+                    info!(peer_spec = %peer_spec, "Received peer info");
                 }
                 // TODO: Add received peers to PeerManager for future connections
             }

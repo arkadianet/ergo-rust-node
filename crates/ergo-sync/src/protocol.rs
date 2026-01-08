@@ -133,9 +133,9 @@ struct PeerSyncState {
 const MIN_SYNC_INTERVAL: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// Minimum interval between modifier requests to the same peer.
-/// Using 500ms to balance between speed and avoiding rate limits.
-/// The Scala node uses PerPeerSyncLockTime = 100ms.
-const MIN_REQUEST_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+/// The Scala node doesn't have explicit per-request throttling, but has deliveryTimeout = 10s.
+/// Using 100ms to allow fast sequential requests while avoiding overwhelming peers.
+const MIN_REQUEST_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 
 /// Maximum number of header IDs to include in SyncInfo message.
 /// The Scala node samples ~100 headers from the chain for SyncInfo.
@@ -169,14 +169,14 @@ impl PeerSyncState {
 impl SyncProtocol {
     /// Create a new sync protocol handler.
     pub fn new(config: SyncConfig, command_tx: mpsc::Sender<SyncCommand>) -> Self {
-        // Genesis block ID for mainnet - headers at height 1 have this as parent
-        let genesis_id =
-            hex::decode("b0244dfc267baca974a4caee06120321562784303a8a688976ae56170e4d175b")
-                .unwrap_or_default();
+        // The genesis parent ID is all zeros - this is the parent of the height=1 block.
+        // The height=1 block (b0244dfc...) has parentId = 0000...0000
+        // We pre-seed this so that when we receive the height=1 header, its parent is "available"
+        let genesis_parent_id = vec![0u8; 32];
 
         let mut stored = std::collections::HashSet::new();
-        // Consider genesis as "stored" so height-1 headers can be applied
-        stored.insert(genesis_id);
+        // Consider genesis parent as "stored" so height-1 headers can be applied
+        stored.insert(genesis_parent_id);
 
         Self {
             synchronizer: Arc::new(Synchronizer::new(config)),
@@ -312,11 +312,10 @@ impl SyncProtocol {
             );
             our_headers
         } else {
-            // Fresh node - send genesis block ID to signal we need headers from the start
-            let genesis_id =
-                hex::decode("b0244dfc267baca974a4caee06120321562784303a8a688976ae56170e4d175b")
-                    .unwrap_or_default();
-            info!("Fresh node - sending genesis ID in SyncInfo to request headers");
+            // Fresh node - send genesis block ID (all zeros) to signal we need headers from the start
+            // The genesis block at height=0 has ID = 0000...0000
+            let genesis_id = vec![0u8; 32];
+            info!("Fresh node - sending genesis ID (all zeros) in SyncInfo to request headers");
             vec![genesis_id]
         };
 
@@ -435,10 +434,8 @@ impl SyncProtocol {
             );
             our_headers
         } else {
-            // Fresh node - send genesis block ID
-            let genesis_id =
-                hex::decode("b0244dfc267baca974a4caee06120321562784303a8a688976ae56170e4d175b")
-                    .unwrap_or_default();
+            // Fresh node - send genesis block ID (all zeros)
+            let genesis_id = vec![0u8; 32];
             debug!("Responding to SyncInfo with genesis ID (fresh node)");
             vec![genesis_id]
         };
@@ -459,9 +456,9 @@ impl SyncProtocol {
             "Received Inv, requesting modifiers"
         );
 
-        // Request modifiers in batches to avoid overwhelming the peer
-        // Ergo protocol typically limits to ~100 modifiers per request
-        const MAX_REQUEST_SIZE: usize = 50;
+        // Request modifiers in batches
+        // Scala node uses desiredInvObjects = 400, so we can request up to 400 at once
+        const MAX_REQUEST_SIZE: usize = 400;
 
         // Only handle header Inv specially (type_id 101)
         let is_header_inv = inv.type_id == ModifierType::Header.to_byte();
@@ -589,8 +586,16 @@ impl SyncProtocol {
         self.in_flight_headers.write().remove(&id);
 
         // Parse header using sigma-rust
-        let header = Header::scorex_parse_bytes(&data)
-            .map_err(|e| SyncError::InvalidData(format!("Failed to parse header: {}", e)))?;
+        let header = match Header::scorex_parse_bytes(&data) {
+            Ok(h) => h,
+            Err(e) => {
+                warn!("Failed to parse header: {}", e);
+                return Err(SyncError::InvalidData(format!(
+                    "Failed to parse header: {}",
+                    e
+                )));
+            }
+        };
 
         // Update peer height if this header is higher than what we've seen
         // This gives us a more accurate peer height than the V1 SyncInfo estimate
@@ -1002,7 +1007,7 @@ impl SyncProtocol {
         // If we have pending Inv IDs, try to request them (respecting rate limits)
         if pending_inv_count > 0 {
             if let Some(peer) = self.find_peer_for_request() {
-                const MAX_REQUEST_SIZE: usize = 50;
+                const MAX_REQUEST_SIZE: usize = 400;
 
                 // Filter out already-stored headers to avoid requesting duplicates
                 let pending_ids: Vec<Vec<u8>> = {
@@ -1078,12 +1083,9 @@ impl SyncProtocol {
                 let sync_ids = if !our_best_ids.is_empty() {
                     our_best_ids
                 } else {
-                    // Fresh node - send genesis block ID
-                    let genesis_id = hex::decode(
-                        "b0244dfc267baca974a4caee06120321562784303a8a688976ae56170e4d175b",
-                    )
-                    .unwrap_or_default();
-                    info!("Fresh node tick - sending genesis ID in SyncInfo");
+                    // Fresh node - send genesis block ID (all zeros)
+                    let genesis_id = vec![0u8; 32];
+                    info!("Fresh node tick - sending genesis ID (all zeros) in SyncInfo");
                     vec![genesis_id]
                 };
 
