@@ -1525,21 +1525,25 @@ impl SyncProtocol {
     }
 
     /// Dispatch pending downloads to peers.
+    /// Distributes blocks across ALL available peers for parallel downloading.
     async fn dispatch_downloads(&self) -> SyncResult<()> {
-        // Find a peer that can receive requests
-        let peer = match self.find_peer_for_request() {
-            Some(p) => p,
-            None => {
-                debug!("No peer available for download dispatch (rate limited)");
-                return Ok(());
-            }
+        // Get ALL available peers that can receive requests (respecting rate limits)
+        let available_peers: Vec<PeerId> = {
+            let peers = self.sync_peers.read();
+            peers
+                .iter()
+                .filter(|(_, state)| state.can_send_request())
+                .map(|(id, _)| id.clone())
+                .collect()
         };
 
-        // Get tasks that can be dispatched to THIS peer (excluding blocks they failed to deliver)
-        // Use larger batch size (50) for better throughput
-        let tasks = self.downloader.get_ready_tasks_for_peer(50, &peer);
-        if tasks.is_empty() {
-            // Check if there are stuck tasks (failed with all peers)
+        if available_peers.is_empty() {
+            debug!("No peers available for download dispatch (all rate limited)");
+            return Ok(());
+        }
+
+        // Check for stuck tasks first
+        {
             let all_peers: Vec<_> = self.sync_peers.read().keys().cloned().collect();
             let stuck = self.downloader.get_stuck_tasks(&all_peers);
             if !stuck.is_empty() {
@@ -1553,37 +1557,62 @@ impl SyncProtocol {
                     self.downloader.clear_failed_peers(id);
                 }
             }
-            return Ok(());
         }
 
-        // Group tasks by type and batch them
-        let mut by_type: std::collections::HashMap<u8, Vec<Vec<u8>>> =
-            std::collections::HashMap::new();
-        for task in &tasks {
-            by_type
-                .entry(task.type_id)
-                .or_default()
-                .push(task.id.clone());
-            self.downloader.dispatch(&task.id, peer.clone());
+        // Distribute tasks across peers: up to 16 blocks per peer (like Scala node)
+        // This balances load while keeping enough work per peer for efficiency
+        const MAX_BLOCKS_PER_PEER: usize = 16;
+
+        let mut total_dispatched = 0;
+
+        for peer in &available_peers {
+            // Get tasks that can be dispatched to THIS peer
+            let tasks = self
+                .downloader
+                .get_ready_tasks_for_peer(MAX_BLOCKS_PER_PEER, peer);
+            if tasks.is_empty() {
+                continue;
+            }
+
+            // Group tasks by type and batch them
+            let mut by_type: std::collections::HashMap<u8, Vec<Vec<u8>>> =
+                std::collections::HashMap::new();
+            for task in &tasks {
+                by_type
+                    .entry(task.type_id)
+                    .or_default()
+                    .push(task.id.clone());
+                self.downloader.dispatch(&task.id, peer.clone());
+            }
+
+            // Update peer state
+            if let Some(state) = self.sync_peers.write().get_mut(peer) {
+                state.in_flight += tasks.len() as u32;
+                state.last_request_sent = std::time::Instant::now();
+            }
+
+            // Send one batched request per type
+            for (type_id, ids) in by_type {
+                debug!(
+                    peer = %peer,
+                    type_id,
+                    count = ids.len(),
+                    "Dispatching block download request"
+                );
+                let request = ModifierRequest { type_id, ids };
+                self.send_to_peer(peer, Message::RequestModifier(request))
+                    .await?;
+            }
+
+            total_dispatched += tasks.len();
         }
 
-        // Update peer state
-        if let Some(state) = self.sync_peers.write().get_mut(&peer) {
-            state.in_flight += tasks.len() as u32;
-            state.last_request_sent = std::time::Instant::now();
-        }
-
-        // Send one batched request per type
-        for (type_id, ids) in by_type {
+        if total_dispatched > 0 {
             debug!(
-                peer = %peer,
-                type_id,
-                count = ids.len(),
-                "Dispatching block download request"
+                peers = available_peers.len(),
+                blocks = total_dispatched,
+                "Multi-peer block dispatch complete"
             );
-            let request = ModifierRequest { type_id, ids };
-            self.send_to_peer(&peer, Message::RequestModifier(request))
-                .await?;
         }
 
         Ok(())
