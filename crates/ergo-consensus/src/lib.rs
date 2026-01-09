@@ -26,6 +26,7 @@ pub mod block;
 pub mod block_validation;
 mod difficulty;
 mod error;
+pub mod nipopow;
 pub mod tx_validation;
 mod validation;
 

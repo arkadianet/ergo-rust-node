@@ -11,7 +11,7 @@ use ergo_storage::{ColumnFamily, Storage, WriteBatch};
 use num_bigint::BigUint;
 use parking_lot::RwLock;
 use sigma_ser::ScorexSerializable;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use tracing::{debug, info, instrument, warn};
 

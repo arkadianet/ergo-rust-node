@@ -213,7 +213,7 @@ fn blake2b_256(data: &[u8]) -> [u8; 32] {
 
 /// Validate an Ergo address and return validation result.
 fn validate_ergo_address(address: &str) -> AddressValidationResponse {
-    use ergo_lib::ergotree_ir::chain::address::{Address, AddressEncoder, NetworkPrefix};
+    use ergo_lib::ergotree_ir::chain::address::{AddressEncoder, NetworkPrefix};
 
     // Try mainnet first, then testnet
     let mainnet_result =

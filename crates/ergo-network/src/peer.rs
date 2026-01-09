@@ -1,12 +1,11 @@
 //! Peer management.
 
-use crate::{NetworkError, NetworkResult};
 use dashmap::DashMap;
 use parking_lot::RwLock;
 use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
-use tracing::{debug, info, warn};
+use tracing::warn;
 
 /// Unique peer identifier.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

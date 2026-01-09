@@ -18,11 +18,16 @@
 mod error;
 mod history;
 mod manager;
+mod snapshots;
 mod utxo;
 
 pub use error::{StateError, StateResult};
 pub use history::{BlockSection, BlockStore, ChainSelection, HeaderStore, History, PruningConfig};
 pub use manager::{StateManager, StateRootVerification};
+pub use snapshots::{
+    Digest32, ManifestId, SnapshotsDb, SnapshotsInfo, SubtreeId, UtxoSetSnapshotDownloadPlan,
+    CHUNKS_IN_PARALLEL_MIN, CHUNKS_PER_PEER, MAINNET_MANIFEST_DEPTH, MIN_SNAPSHOT_PEERS,
+};
 pub use utxo::{BoxEntry, StateChange, UndoData, UtxoState};
 
 use ergo_storage::ColumnFamily;

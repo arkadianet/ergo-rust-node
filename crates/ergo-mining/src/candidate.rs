@@ -1,8 +1,8 @@
 //! Block candidate generation.
 
 use crate::{block_reward_at_height, MiningError, MiningResult, MAX_TRANSACTIONS_PER_BLOCK};
-use ergo_chain_types::{BlockId, Digest32};
-use ergo_consensus::{BlockTransactions, DifficultyAdjustment, HeaderForDifficulty};
+use ergo_chain_types::BlockId;
+use ergo_consensus::{DifficultyAdjustment, HeaderForDifficulty};
 use ergo_mempool::Mempool;
 use ergo_state::StateManager;
 use parking_lot::RwLock;

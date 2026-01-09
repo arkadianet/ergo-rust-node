@@ -1,6 +1,6 @@
 //! Block download management.
 
-use crate::{SyncError, SyncResult, PARALLEL_DOWNLOADS};
+use crate::PARALLEL_DOWNLOADS;
 use ergo_network::PeerId;
 use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};

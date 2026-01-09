@@ -5,7 +5,7 @@ use ergo_consensus::{nbits_to_target, AutolykosSolution, AutolykosV2};
 use parking_lot::RwLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 /// Miner configuration.
 #[derive(Debug, Clone)]

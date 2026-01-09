@@ -108,6 +108,10 @@ pub enum ConsensusError {
     /// Storage error.
     #[error("Storage error: {0}")]
     Storage(#[from] ergo_storage::StorageError),
+
+    /// Generic validation error.
+    #[error("Validation error: {0}")]
+    Validation(String),
 }
 
 /// Result type for consensus operations.

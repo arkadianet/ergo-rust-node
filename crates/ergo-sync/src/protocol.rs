@@ -19,7 +19,7 @@ use parking_lot::RwLock;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tracing::{debug, error, info, trace, warn};
+use tracing::{debug, info, warn};
 
 /// Compute the Blake2b-256 hash of header bytes to get the correct header ID.
 /// This is needed because sigma-rust's Header::scorex_parse_bytes() computes the ID

@@ -7,9 +7,8 @@
 //! - Handshake protocol implementation
 
 use crate::{
-    ConnectionConfig, Handshake, HandshakeCodec, HandshakeData, Message, MessageCodec,
-    NetworkError, NetworkResult, PeerId, PeerInfo, PeerManager, PeerState, MAINNET_MAGIC,
-    PROTOCOL_VERSION,
+    ConnectionConfig, Handshake, HandshakeData, Message, MessageCodec, NetworkError, NetworkResult,
+    PeerId, PeerInfo, PeerManager, PeerState, MAINNET_MAGIC, PROTOCOL_VERSION,
 };
 use futures::stream::StreamExt;
 use futures::SinkExt;

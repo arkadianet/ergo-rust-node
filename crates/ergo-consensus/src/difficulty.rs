@@ -5,7 +5,6 @@
 
 use crate::params::{BLOCK_INTERVAL_SECS, DIFFICULTY_EPOCHS, EPOCH_LENGTH, MAX_DIFFICULTY_CHANGE};
 use crate::{ConsensusError, ConsensusResult};
-use num_bigint::BigUint;
 use tracing::debug;
 
 /// Header data needed for difficulty calculation.
@@ -178,6 +177,7 @@ pub fn calculate_required_difficulty(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use num_bigint::BigUint;
 
     #[test]
     fn test_difficulty_within_epoch() {

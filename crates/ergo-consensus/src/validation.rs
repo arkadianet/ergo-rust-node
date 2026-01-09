@@ -1,6 +1,6 @@
 //! Block and transaction validation.
 
-use crate::params::{MAX_BLOCK_COST, MAX_BLOCK_SIZE};
+use crate::params::MAX_BLOCK_SIZE;
 use crate::{ConsensusError, ConsensusResult};
 use tracing::{debug, instrument};
 

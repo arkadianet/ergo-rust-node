@@ -21,7 +21,9 @@ pub use connection::{Connection, ConnectionConfig};
 pub use error::{NetworkError, NetworkResult};
 pub use handshake::{DeclaredAddress, HandshakeCodec, HandshakeData, PeerSpec};
 pub use message::{
-    Handshake, InvData, Message, MessageType, ModifierData, ModifierItem, ModifierRequest, SyncInfo,
+    Handshake, InvData, ManifestData, ManifestRequest, Message, MessageType, ModifierData,
+    ModifierItem, ModifierRequest, SnapshotsInfo, SyncInfo, UtxoChunkData, UtxoChunkRequest,
+    MAX_CHUNK_SIZE, MAX_MANIFEST_SIZE, MAX_SNAPSHOTS_INFO_ENTRIES,
 };
 pub use peer::{PeerId, PeerInfo, PeerManager, PeerState};
 pub use service::{NetworkCommand, NetworkConfig, NetworkEvent, NetworkService, PeerHandle};

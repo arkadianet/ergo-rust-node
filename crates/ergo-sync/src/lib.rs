@@ -17,7 +17,10 @@ mod sync;
 pub use download::{BlockDownloader, DownloadConfig, DownloadStats, DownloadTask};
 pub use error::{SyncError, SyncResult};
 pub use protocol::{SyncCommand, SyncEvent, SyncProtocol};
-pub use sync::{SyncConfig, SyncState, Synchronizer};
+pub use sync::{
+    AvailableManifests, SyncConfig, SyncState, Synchronizer, CHUNKS_IN_PARALLEL_MIN,
+    CHUNKS_PER_PEER, CHUNK_TIMEOUT_MULTIPLIER, MIN_SNAPSHOT_PEERS,
+};
 
 /// Number of headers to request at once.
 pub const HEADERS_BATCH_SIZE: usize = 100;

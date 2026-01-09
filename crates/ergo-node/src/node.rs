@@ -1131,6 +1131,31 @@ impl Node {
             Message::Handshake(_) => {
                 // Handshake already handled by NetworkService
             }
+            // UTXO Snapshot sync messages - placeholder handling
+            Message::GetSnapshotsInfo => {
+                debug!(peer = %peer_id, "GetSnapshotsInfo received - not implemented yet");
+                // TODO: Respond with our available snapshots info
+            }
+            Message::SnapshotsInfo(info) => {
+                debug!(peer = %peer_id, manifests = info.available_manifests.len(), "SnapshotsInfo received");
+                // TODO: Process snapshots info and potentially request manifest
+            }
+            Message::GetManifest(request) => {
+                debug!(peer = %peer_id, manifest_id = hex::encode(&request.manifest_id), "GetManifest received - not implemented yet");
+                // TODO: Respond with manifest if we have it
+            }
+            Message::Manifest(data) => {
+                debug!(peer = %peer_id, size = data.data.len(), "Manifest received");
+                // TODO: Process manifest and start chunk download
+            }
+            Message::GetUtxoSnapshotChunk(request) => {
+                debug!(peer = %peer_id, chunk_id = hex::encode(&request.subtree_id), "GetUtxoSnapshotChunk received - not implemented yet");
+                // TODO: Respond with chunk if we have it
+            }
+            Message::UtxoSnapshotChunk(data) => {
+                debug!(peer = %peer_id, size = data.data.len(), "UtxoSnapshotChunk received");
+                // TODO: Store chunk and check if download is complete
+            }
         }
     }
 
