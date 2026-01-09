@@ -1573,13 +1573,16 @@ impl SyncProtocol {
             }
         }
 
-        // Distribute tasks across peers: up to 16 blocks per peer (like Scala node)
-        // This balances load while keeping enough work per peer for efficiency
+        // Distribute tasks across peers: up to 16 blocks per peer
+        // Limit to 8 peers max to avoid overwhelming the network with too many concurrent requests
+        // With 8 peers × 16 blocks = 128 blocks in-flight, which is a good balance
         const MAX_BLOCKS_PER_PEER: usize = 16;
+        const MAX_PEERS_TO_USE: usize = 8;
 
         let mut total_dispatched = 0;
+        let peers_to_use = available_peers.len().min(MAX_PEERS_TO_USE);
 
-        for peer in &available_peers {
+        for peer in available_peers.iter().take(peers_to_use) {
             // Get tasks that can be dispatched to THIS peer
             let tasks = self
                 .downloader

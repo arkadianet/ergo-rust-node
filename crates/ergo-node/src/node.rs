@@ -283,10 +283,10 @@ impl Node {
 
         // Create sync protocol
         let (sync_cmd_tx, mut sync_cmd_rx) = mpsc::channel::<SyncCommand>(500);
-        // Large buffer for sync events to avoid blocking during header sync
-        // Headers come in batches of 400 from multiple peers, and disk I/O can be slow
-        // Need enough capacity to buffer while headers are being written to storage
-        let (sync_event_tx, mut sync_event_rx) = mpsc::channel::<SyncEvent>(10000);
+        // Large buffer for sync events to avoid blocking during block validation
+        // Block validation can take 1-2 seconds for complex blocks, during which
+        // we need to buffer incoming blocks and network events to avoid back-pressure
+        let (sync_event_tx, mut sync_event_rx) = mpsc::channel::<SyncEvent>(50000);
         let sync_protocol = SyncProtocol::new(SyncConfig::default(), sync_cmd_tx.clone());
 
         // Initialize sync protocol with stored headers from database
@@ -443,8 +443,8 @@ impl Node {
             let mut reconnect_interval = tokio::time::interval(std::time::Duration::from_secs(10));
             reconnect_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-            // Block sync check interval (every 5 seconds)
-            let mut block_sync_interval = tokio::time::interval(std::time::Duration::from_secs(5));
+            // Block sync check interval (every 1 second for faster pipeline filling)
+            let mut block_sync_interval = tokio::time::interval(std::time::Duration::from_secs(1));
             block_sync_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
             while !shutdown_for_router.load(Ordering::SeqCst) {
@@ -461,7 +461,8 @@ impl Node {
                         // and there's a meaningful gap (at least 1 block behind)
                         if header_height > utxo_height && header_height > 0 {
                             // Request next batch of blocks starting from current UTXO height + 1
-                            let batch_size = 16.min(header_height - utxo_height) as u32;
+                            // Use batch of 64 to better fill the download pipeline
+                            let batch_size = 64.min(header_height - utxo_height) as u32;
                             match state_for_router.get_headers(utxo_height + 1, batch_size) {
                                 Ok(headers) if !headers.is_empty() => {
                                     info!(
@@ -684,7 +685,18 @@ impl Node {
                                     // This is the next block - apply it directly
                                     debug!(height = block_height, "Block is next in sequence, applying directly");
                                 } else if block_height > current_utxo_height + 1 {
-                                    // Block arrived out of order - buffer it
+                                    // Block arrived out of order - buffer it if we have space
+                                    // Limit buffer to 256 blocks (~128MB) to prevent memory bloat
+                                    const MAX_PENDING_BLOCKS: usize = 256;
+                                    if pending_blocks.len() >= MAX_PENDING_BLOCKS {
+                                        debug!(
+                                            block_height,
+                                            current_utxo_height,
+                                            buffered = pending_blocks.len(),
+                                            "Pending blocks buffer full, dropping out-of-order block"
+                                        );
+                                        continue;
+                                    }
                                     debug!(
                                         block_height,
                                         current_utxo_height,
@@ -711,7 +723,8 @@ impl Node {
                                 }
 
                                 // Batch size for writing to disk (tune for performance)
-                                const BATCH_WRITE_SIZE: usize = 32;
+                                // Testing with 64 blocks per batch
+                                const BATCH_WRITE_SIZE: usize = 64;
 
                                 // Validate blocks and collect them for batched application
                                 let mut validated_blocks: Vec<(ergo_consensus::FullBlock, StateChange, Vec<u8>)> = Vec::new();
