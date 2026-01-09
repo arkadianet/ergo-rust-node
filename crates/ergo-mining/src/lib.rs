@@ -16,7 +16,8 @@ mod miner;
 
 pub use candidate::{BlockCandidate, CandidateGenerator};
 pub use coinbase::{
-    block_reward_at_height, calculate_total_reward, CoinbaseBuilder, EmissionParams,
+    block_reward_at_height, calculate_total_reward, emission_at_height, reemission_at_height,
+    CoinbaseBuilder, EmissionParams,
 };
 pub use ergo_lib::ergotree_ir::chain::address::NetworkPrefix;
 pub use error::{MiningError, MiningResult};

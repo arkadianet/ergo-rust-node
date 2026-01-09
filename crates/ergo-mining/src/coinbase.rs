@@ -5,15 +5,23 @@
 //!
 //! In Ergo, the coinbase transaction is created by spending the emission box
 //! and creating outputs for the miner reward and the new emission box.
+//!
+//! ## EIP-27 Re-emission
+//!
+//! After EIP-27 activation, a portion of the block reward is redirected to
+//! the re-emission contract:
+//! - 12 ERG per block goes to re-emission when emission >= 15 ERG
+//! - After emission drops to 3 ERG, miners can claim 3 ERG/block from re-emission
 
 use crate::{MiningError, MiningResult};
+use ergo_consensus::reemission::{ReemissionRules, ReemissionSettings};
 use ergo_lib::ergotree_ir::chain::address::{AddressEncoder, NetworkPrefix};
 use ergo_lib::ergotree_ir::chain::ergo_box::{
     box_value::BoxValue, ErgoBoxCandidate, NonMandatoryRegisters,
 };
 use tracing::debug;
 
-/// Emission schedule parameters.
+/// Emission schedule parameters (legacy - kept for compatibility).
 pub struct EmissionParams {
     /// Initial reward in nanoERG.
     pub initial_reward: u64,
@@ -41,7 +49,7 @@ impl Default for EmissionParams {
 }
 
 impl EmissionParams {
-    /// Calculate block reward for a given height.
+    /// Calculate block reward for a given height (legacy method).
     pub fn reward_at_height(&self, height: u32) -> u64 {
         let fixed_blocks = self.fixed_rate_years * self.blocks_per_year;
 
@@ -57,10 +65,10 @@ impl EmissionParams {
     }
 }
 
-/// Coinbase transaction builder.
+/// Coinbase transaction builder with EIP-27 re-emission support.
 pub struct CoinbaseBuilder {
-    /// Emission parameters.
-    emission: EmissionParams,
+    /// Re-emission rules (includes emission schedule).
+    reemission_rules: ReemissionRules,
     /// Network prefix for address parsing.
     network: NetworkPrefix,
 }
@@ -72,17 +80,65 @@ impl Default for CoinbaseBuilder {
 }
 
 impl CoinbaseBuilder {
-    /// Create a new coinbase builder with default emission parameters.
+    /// Create a new coinbase builder with mainnet settings.
     pub fn new(network: NetworkPrefix) -> Self {
+        let settings = match network {
+            NetworkPrefix::Mainnet => ReemissionSettings::mainnet(),
+            NetworkPrefix::Testnet => ReemissionSettings::testnet(),
+        };
         Self {
-            emission: EmissionParams::default(),
+            reemission_rules: ReemissionRules::new(settings),
             network,
         }
     }
 
-    /// Create with custom emission parameters.
-    pub fn with_emission(emission: EmissionParams, network: NetworkPrefix) -> Self {
-        Self { emission, network }
+    /// Create with custom re-emission settings.
+    pub fn with_reemission(settings: ReemissionSettings, network: NetworkPrefix) -> Self {
+        Self {
+            reemission_rules: ReemissionRules::new(settings),
+            network,
+        }
+    }
+
+    /// Create with legacy emission parameters (for backward compatibility).
+    ///
+    /// **Deprecated**: Use `new()` or `with_reemission()` instead.
+    /// This method ignores the `emission` parameter and uses the accurate
+    /// EIP-27 re-emission rules.
+    #[deprecated(
+        since = "0.1.0",
+        note = "Use CoinbaseBuilder::new() or CoinbaseBuilder::with_reemission() instead. \
+                Legacy EmissionParams is an approximation; accurate EIP-27 rules are now used."
+    )]
+    pub fn with_emission(_emission: EmissionParams, network: NetworkPrefix) -> Self {
+        Self::new(network)
+    }
+
+    /// Get the miner's direct reward at a given height.
+    ///
+    /// This is the emission minus any re-emission contribution (EIP-27).
+    pub fn miner_reward_at_height(&self, height: u32) -> u64 {
+        self.reemission_rules.miner_reward_at_height(height)
+    }
+
+    /// Get the re-emission contribution at a given height.
+    ///
+    /// This is the amount redirected to the re-emission contract (EIP-27).
+    pub fn reemission_at_height(&self, height: u32) -> u64 {
+        self.reemission_rules.reemission_for_height(height)
+    }
+
+    /// Get the claimable re-emission reward at a given height.
+    ///
+    /// After reemission_start_height, miners can claim 3 ERG/block from
+    /// the re-emission contract.
+    pub fn claimable_reemission_at_height(&self, height: u32) -> u64 {
+        self.reemission_rules.claimable_reemission_at_height(height)
+    }
+
+    /// Get the total miner income at a given height (direct + claimable).
+    pub fn total_miner_income_at_height(&self, height: u32) -> u64 {
+        self.reemission_rules.total_miner_income_at_height(height)
     }
 
     /// Build a coinbase reward box candidate.
@@ -95,22 +151,27 @@ impl CoinbaseBuilder {
     /// # Returns
     /// An ErgoBoxCandidate for the miner reward output.
     ///
-    /// Note: The full coinbase transaction requires spending the emission box,
-    /// which is handled by the emission contract. This method creates the
-    /// miner's reward output box.
+    /// Note: This creates the direct miner reward. After EIP-27 activation,
+    /// a separate re-emission output would be created with `reemission_at_height()`.
     pub fn build_reward_box(
         &self,
         height: u32,
         reward_address: &str,
         total_fees: u64,
     ) -> MiningResult<ErgoBoxCandidate> {
-        // Calculate block reward
-        let block_reward = self.emission.reward_at_height(height);
+        // Calculate direct block reward (after EIP-27 deductions)
+        let block_reward = self.miner_reward_at_height(height);
         let total_reward = block_reward + total_fees;
+
+        let reemission_amount = self.reemission_at_height(height);
 
         debug!(
             height,
-            block_reward, total_fees, total_reward, "Building coinbase reward box"
+            block_reward,
+            reemission_amount,
+            total_fees,
+            total_reward,
+            "Building coinbase reward box"
         );
 
         // Parse reward address to get ErgoTree
@@ -138,65 +199,126 @@ impl CoinbaseBuilder {
         Ok(output)
     }
 
-    /// Calculate total reward for a block (block reward + fees).
+    /// Calculate total reward for a block (direct reward + fees).
+    ///
+    /// Note: This does not include claimable re-emission.
     pub fn calculate_reward(&self, height: u32, total_fees: u64) -> u64 {
-        self.emission.reward_at_height(height) + total_fees
+        self.miner_reward_at_height(height) + total_fees
     }
 
-    /// Get the emission parameters.
-    pub fn emission(&self) -> &EmissionParams {
-        &self.emission
+    /// Get the re-emission rules.
+    pub fn reemission_rules(&self) -> &ReemissionRules {
+        &self.reemission_rules
+    }
+
+    /// Legacy method - get emission parameters as approximation.
+    pub fn emission(&self) -> EmissionParams {
+        EmissionParams::default()
     }
 }
 
-/// Calculate the total reward for a block.
+/// Calculate the total reward for a block (direct miner reward + fees).
+///
+/// Uses EIP-27 rules to calculate the proper miner reward.
 pub fn calculate_total_reward(height: u32, total_fees: u64) -> u64 {
-    let emission = EmissionParams::default();
-    emission.reward_at_height(height) + total_fees
+    let rules = ReemissionRules::new(ReemissionSettings::mainnet());
+    rules.miner_reward_at_height(height) + total_fees
 }
 
 /// Calculate the block reward at a given height (without fees).
+///
+/// This returns the miner's direct reward after EIP-27 deductions.
 pub fn block_reward_at_height(height: u32) -> u64 {
-    EmissionParams::default().reward_at_height(height)
+    let rules = ReemissionRules::new(ReemissionSettings::mainnet());
+    rules.miner_reward_at_height(height)
+}
+
+/// Calculate the raw emission at a given height (before EIP-27 deductions).
+pub fn emission_at_height(height: u32) -> u64 {
+    let rules = ReemissionRules::new(ReemissionSettings::mainnet());
+    rules.emission_at_height(height as u64)
+}
+
+/// Calculate the re-emission amount at a given height.
+pub fn reemission_at_height(height: u32) -> u64 {
+    let rules = ReemissionRules::new(ReemissionSettings::mainnet());
+    rules.reemission_for_height(height)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ergo_consensus::reemission::COINS_IN_ONE_ERG;
 
     #[test]
-    fn test_emission_schedule() {
-        let emission = EmissionParams::default();
-        let erg = 1_000_000_000u64;
-        let blocks_per_year = 262_800u32;
-
-        // First 2 years (blocks 1 to 525,600)
-        assert_eq!(emission.reward_at_height(1), 75 * erg);
-        assert_eq!(emission.reward_at_height(blocks_per_year), 75 * erg);
-        assert_eq!(emission.reward_at_height(2 * blocks_per_year), 75 * erg);
-
-        // After 2 years, reduction starts
-        // Block 525,601 is first block after fixed period
-        // But reduction is calculated by complete years after the fixed period
-        // So blocks 525,601 to 788,400 (year 3) still get 75 ERG
-        // Year 4 (blocks 788,401+) gets 72 ERG (reduced by 3)
-        assert_eq!(emission.reward_at_height(2 * blocks_per_year + 1), 75 * erg);
-
-        // After one full year past fixed period (3 years total)
-        // years_after_fixed = (788401 - 525600) / 262800 = 1
-        // reduction = 1 * 3 ERG = 3 ERG
-        // reward = 75 - 3 = 72 ERG
-        assert_eq!(emission.reward_at_height(3 * blocks_per_year + 1), 72 * erg);
-
-        // Much later - minimum reward
-        assert_eq!(emission.reward_at_height(100_000_000), 3 * erg);
+    fn test_emission_schedule_early() {
+        // Before EIP-27 activation, miner gets full emission
+        let reward = block_reward_at_height(100);
+        assert_eq!(reward, 75 * COINS_IN_ONE_ERG);
     }
 
     #[test]
-    fn test_total_reward() {
-        let erg = 1_000_000_000u64;
-        let fees = 100_000_000u64; // 0.1 ERG in fees
+    fn test_emission_schedule_after_activation() {
+        // After EIP-27 activation (height 777,217+)
+        // Emission is ~66 ERG, re-emission is 12 ERG, miner gets 54 ERG
+        let reward = block_reward_at_height(777_217);
+        assert_eq!(reward, 54 * COINS_IN_ONE_ERG);
 
-        assert_eq!(calculate_total_reward(1, fees), 75 * erg + fees);
+        let reemission = reemission_at_height(777_217);
+        assert_eq!(reemission, 12 * COINS_IN_ONE_ERG);
+    }
+
+    #[test]
+    fn test_emission_at_reemission_start() {
+        // At height 2,080,800, emission is at minimum (3 ERG)
+        // No re-emission deduction when at minimum
+        let reward = block_reward_at_height(2_080_800);
+        assert_eq!(reward, 3 * COINS_IN_ONE_ERG);
+
+        let reemission = reemission_at_height(2_080_800);
+        assert_eq!(reemission, 0);
+    }
+
+    #[test]
+    fn test_total_reward_with_fees() {
+        let fees = 100_000_000u64; // 0.1 ERG
+
+        // Early block: 75 ERG + fees
+        assert_eq!(
+            calculate_total_reward(100, fees),
+            75 * COINS_IN_ONE_ERG + fees
+        );
+
+        // After activation: 54 ERG + fees
+        assert_eq!(
+            calculate_total_reward(777_217, fees),
+            54 * COINS_IN_ONE_ERG + fees
+        );
+    }
+
+    #[test]
+    fn test_coinbase_builder() {
+        let builder = CoinbaseBuilder::new(NetworkPrefix::Mainnet);
+
+        // Test early block
+        assert_eq!(builder.miner_reward_at_height(100), 75 * COINS_IN_ONE_ERG);
+        assert_eq!(builder.reemission_at_height(100), 0);
+
+        // Test after activation
+        assert_eq!(
+            builder.miner_reward_at_height(777_217),
+            54 * COINS_IN_ONE_ERG
+        );
+        assert_eq!(builder.reemission_at_height(777_217), 12 * COINS_IN_ONE_ERG);
+
+        // Test at reemission start
+        assert_eq!(
+            builder.claimable_reemission_at_height(2_080_800),
+            3 * COINS_IN_ONE_ERG
+        );
+        assert_eq!(
+            builder.total_miner_income_at_height(2_080_800),
+            6 * COINS_IN_ONE_ERG
+        );
     }
 }
