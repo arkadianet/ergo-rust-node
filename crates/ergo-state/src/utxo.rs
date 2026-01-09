@@ -14,6 +14,7 @@ use ergo_lib::ergotree_ir::chain::ergo_box::{BoxId, ErgoBox};
 use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
 use ergo_storage::{ColumnFamily, Storage, WriteBatch};
 use parking_lot::RwLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tracing::{debug, info, instrument, warn};
 
@@ -402,6 +403,10 @@ pub struct UtxoState {
     state_root: RwLock<Vec<u8>>,
     /// Current height.
     height: RwLock<u32>,
+    /// When true, skip index maintenance for faster initial sync.
+    /// This dramatically reduces disk I/O by avoiding read-modify-write operations
+    /// on the ErgoTree and Token indexes during sync.
+    sync_mode: AtomicBool,
 }
 
 impl UtxoState {
@@ -411,6 +416,7 @@ impl UtxoState {
             storage,
             state_root: RwLock::new(vec![0; 32]),
             height: RwLock::new(0),
+            sync_mode: AtomicBool::new(false),
         }
     }
 
@@ -431,6 +437,25 @@ impl UtxoState {
         }
 
         Ok(state)
+    }
+
+    /// Enable or disable sync mode.
+    /// When sync mode is enabled, index maintenance (ErgoTree and Token indexes) is skipped
+    /// to dramatically reduce disk I/O during initial blockchain sync.
+    pub fn set_sync_mode(&self, enabled: bool) {
+        let was_enabled = self.sync_mode.swap(enabled, Ordering::Relaxed);
+        if was_enabled != enabled {
+            if enabled {
+                info!("Sync mode ENABLED - skipping index maintenance for faster sync");
+            } else {
+                info!("Sync mode DISABLED - index maintenance resumed");
+            }
+        }
+    }
+
+    /// Check if sync mode is enabled.
+    pub fn is_sync_mode(&self) -> bool {
+        self.sync_mode.load(Ordering::Relaxed)
     }
 
     /// Get the current state root.
@@ -578,6 +603,9 @@ impl UtxoState {
     pub fn apply_change(&self, change: &StateChange, new_height: u32) -> StateResult<()> {
         let mut batch = WriteBatch::new();
 
+        // Check if we should skip index maintenance (sync mode)
+        let skip_indexes = self.is_sync_mode();
+
         // Create undo data to enable rollback
         let mut undo = UndoData::new(new_height);
 
@@ -585,30 +613,33 @@ impl UtxoState {
         for box_id in &change.spent {
             // Get the box data before removing it (for undo and index removal)
             if let Some(entry) = self.get_box(box_id)? {
-                // Remove from ErgoTree index
-                let ergotree_hash = Self::hash_ergotree(&entry.ergo_box);
-                self.remove_from_index(
-                    &mut batch,
-                    columns::ERGOTREE_INDEX,
-                    &ergotree_hash,
-                    box_id.as_ref(),
-                )?;
-
-                // Remove from Token index for each token in the box
-                for token in entry
-                    .ergo_box
-                    .tokens
-                    .as_ref()
-                    .map(|t| t.as_slice())
-                    .unwrap_or(&[])
-                {
-                    let token_id = token.token_id.as_ref();
+                // Only update indexes if not in sync mode
+                if !skip_indexes {
+                    // Remove from ErgoTree index
+                    let ergotree_hash = Self::hash_ergotree(&entry.ergo_box);
                     self.remove_from_index(
                         &mut batch,
-                        columns::TOKEN_INDEX,
-                        token_id,
+                        columns::ERGOTREE_INDEX,
+                        &ergotree_hash,
                         box_id.as_ref(),
                     )?;
+
+                    // Remove from Token index for each token in the box
+                    for token in entry
+                        .ergo_box
+                        .tokens
+                        .as_ref()
+                        .map(|t| t.as_slice())
+                        .unwrap_or(&[])
+                    {
+                        let token_id = token.token_id.as_ref();
+                        self.remove_from_index(
+                            &mut batch,
+                            columns::TOKEN_INDEX,
+                            token_id,
+                            box_id.as_ref(),
+                        )?;
+                    }
                 }
 
                 undo.spent_boxes.push(entry);
@@ -624,25 +655,28 @@ impl UtxoState {
             let box_id_bytes = entry.box_id_bytes();
             undo.created_box_ids.push(box_id_bytes.clone());
 
-            // Add to ErgoTree index
-            let ergotree_hash = Self::hash_ergotree(&entry.ergo_box);
-            self.add_to_index(
-                &mut batch,
-                columns::ERGOTREE_INDEX,
-                &ergotree_hash,
-                &box_id_bytes,
-            )?;
+            // Only update indexes if not in sync mode
+            if !skip_indexes {
+                // Add to ErgoTree index
+                let ergotree_hash = Self::hash_ergotree(&entry.ergo_box);
+                self.add_to_index(
+                    &mut batch,
+                    columns::ERGOTREE_INDEX,
+                    &ergotree_hash,
+                    &box_id_bytes,
+                )?;
 
-            // Add to Token index for each token in the box
-            for token in entry
-                .ergo_box
-                .tokens
-                .as_ref()
-                .map(|t| t.as_slice())
-                .unwrap_or(&[])
-            {
-                let token_id = token.token_id.as_ref();
-                self.add_to_index(&mut batch, columns::TOKEN_INDEX, token_id, &box_id_bytes)?;
+                // Add to Token index for each token in the box
+                for token in entry
+                    .ergo_box
+                    .tokens
+                    .as_ref()
+                    .map(|t| t.as_slice())
+                    .unwrap_or(&[])
+                {
+                    let token_id = token.token_id.as_ref();
+                    self.add_to_index(&mut batch, columns::TOKEN_INDEX, token_id, &box_id_bytes)?;
+                }
             }
 
             batch.put(columns::UTXO, box_id_bytes, serialized);
@@ -681,6 +715,9 @@ impl UtxoState {
         change: &StateChange,
         new_height: u32,
     ) -> StateResult<()> {
+        // Check if we should skip index maintenance (sync mode)
+        let skip_indexes = self.is_sync_mode();
+
         // Create undo data to enable rollback
         let mut undo = UndoData::new(new_height);
 
@@ -688,25 +725,33 @@ impl UtxoState {
         for box_id in &change.spent {
             // Get the box data before removing it (for undo and index removal)
             if let Some(entry) = self.get_box(box_id)? {
-                // Remove from ErgoTree index
-                let ergotree_hash = Self::hash_ergotree(&entry.ergo_box);
-                self.remove_from_index(
-                    batch,
-                    columns::ERGOTREE_INDEX,
-                    &ergotree_hash,
-                    box_id.as_ref(),
-                )?;
+                // Only update indexes if not in sync mode
+                if !skip_indexes {
+                    // Remove from ErgoTree index
+                    let ergotree_hash = Self::hash_ergotree(&entry.ergo_box);
+                    self.remove_from_index(
+                        batch,
+                        columns::ERGOTREE_INDEX,
+                        &ergotree_hash,
+                        box_id.as_ref(),
+                    )?;
 
-                // Remove from Token index for each token in the box
-                for token in entry
-                    .ergo_box
-                    .tokens
-                    .as_ref()
-                    .map(|t| t.as_slice())
-                    .unwrap_or(&[])
-                {
-                    let token_id = token.token_id.as_ref();
-                    self.remove_from_index(batch, columns::TOKEN_INDEX, token_id, box_id.as_ref())?;
+                    // Remove from Token index for each token in the box
+                    for token in entry
+                        .ergo_box
+                        .tokens
+                        .as_ref()
+                        .map(|t| t.as_slice())
+                        .unwrap_or(&[])
+                    {
+                        let token_id = token.token_id.as_ref();
+                        self.remove_from_index(
+                            batch,
+                            columns::TOKEN_INDEX,
+                            token_id,
+                            box_id.as_ref(),
+                        )?;
+                    }
                 }
 
                 undo.spent_boxes.push(entry);
@@ -722,25 +767,28 @@ impl UtxoState {
             let box_id_bytes = entry.box_id_bytes();
             undo.created_box_ids.push(box_id_bytes.clone());
 
-            // Add to ErgoTree index
-            let ergotree_hash = Self::hash_ergotree(&entry.ergo_box);
-            self.add_to_index(
-                batch,
-                columns::ERGOTREE_INDEX,
-                &ergotree_hash,
-                &box_id_bytes,
-            )?;
+            // Only update indexes if not in sync mode
+            if !skip_indexes {
+                // Add to ErgoTree index
+                let ergotree_hash = Self::hash_ergotree(&entry.ergo_box);
+                self.add_to_index(
+                    batch,
+                    columns::ERGOTREE_INDEX,
+                    &ergotree_hash,
+                    &box_id_bytes,
+                )?;
 
-            // Add to Token index for each token in the box
-            for token in entry
-                .ergo_box
-                .tokens
-                .as_ref()
-                .map(|t| t.as_slice())
-                .unwrap_or(&[])
-            {
-                let token_id = token.token_id.as_ref();
-                self.add_to_index(batch, columns::TOKEN_INDEX, token_id, &box_id_bytes)?;
+                // Add to Token index for each token in the box
+                for token in entry
+                    .ergo_box
+                    .tokens
+                    .as_ref()
+                    .map(|t| t.as_slice())
+                    .unwrap_or(&[])
+                {
+                    let token_id = token.token_id.as_ref();
+                    self.add_to_index(batch, columns::TOKEN_INDEX, token_id, &box_id_bytes)?;
+                }
             }
 
             batch.put(columns::UTXO, box_id_bytes, serialized);

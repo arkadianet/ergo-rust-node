@@ -290,8 +290,25 @@ impl Node {
         let sync_protocol = SyncProtocol::new(SyncConfig::default(), sync_cmd_tx.clone());
 
         // Initialize sync protocol with stored headers from database
-        let (_, header_height) = self.state.heights();
-        info!("Initializing sync with header_height={}", header_height);
+        let (utxo_height, header_height) = self.state.heights();
+        info!(
+            "Initializing sync with utxo_height={}, header_height={}",
+            utxo_height, header_height
+        );
+
+        // Enable sync mode if we're far behind (more than 1000 blocks)
+        // This disables index maintenance for dramatically faster initial sync
+        let far_behind =
+            header_height > utxo_height + 1000 || (utxo_height == 0 && header_height > 0);
+        if far_behind {
+            info!(
+                utxo_height,
+                header_height,
+                blocks_behind = header_height.saturating_sub(utxo_height),
+                "Enabling sync mode - index maintenance disabled for faster sync"
+            );
+            self.state.utxo.set_sync_mode(true);
+        }
         if header_height > 0 {
             // Set the synchronizer's height to our stored header height
             sync_protocol.set_height(header_height);
@@ -926,6 +943,22 @@ impl Node {
 
                                 // After processing, request more blocks if we're still behind
                                 let (utxo_height, header_height) = state_for_router.heights();
+
+                                // Check if we've caught up - disable sync mode if within 10 blocks
+                                if state_for_router.utxo.is_sync_mode() {
+                                    let blocks_behind = header_height.saturating_sub(utxo_height);
+                                    if blocks_behind <= 10 {
+                                        info!(
+                                            utxo_height,
+                                            header_height,
+                                            "Sync complete - disabling sync mode, index maintenance resumed"
+                                        );
+                                        state_for_router.utxo.set_sync_mode(false);
+                                        // Note: Indexes will be rebuilt incrementally as new blocks arrive
+                                        // For a full rebuild, could spawn a background task here
+                                    }
+                                }
+
                                 if utxo_height < header_height {
                                     // Get next batch of headers to download blocks for
                                     let batch_size = 16.min(header_height - utxo_height) as u32;
