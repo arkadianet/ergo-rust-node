@@ -13,13 +13,26 @@ ergo-consensus = { path = "../ergo-consensus" }
 ergo-state = { path = "../ergo-state" }
 ergo-mempool = { path = "../ergo-mempool" }
 ergo-network = { path = "../ergo-network" }
+ergo-api = { path = "../ergo-api" }
+ergo-mining = { path = "../ergo-mining" }
+ergo-sync = { path = "../ergo-sync" }
 
 # Testing
 tempfile = "3"
 proptest = "1"
+tower = { version = "0.4", features = ["util"] }
+hyper = "1"
 
 # Async
 tokio = { version = "1", features = ["full", "test-util"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# HTTP
+axum = "0.7"
+http-body-util = "0.1"
 
 # Utilities
 hex = "0.4"
