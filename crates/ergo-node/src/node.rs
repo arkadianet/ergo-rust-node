@@ -696,8 +696,6 @@ impl Node {
                                 let _ = response_tx.send(result);
                             }
                             SyncCommand::ApplyBlock { block_id, block_data } => {
-                                debug!(block_id = %hex::encode(&block_id), size = block_data.len(), "Received block for application");
-
                                 // Get the header to determine block height
                                 let header_id = BlockId(
                                     Digest32::from(

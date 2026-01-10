@@ -76,12 +76,14 @@ pub struct Checkpoint {
 }
 
 impl Checkpoint {
-    /// Mainnet checkpoint (from Scala node config).
+    /// Mainnet checkpoint (updated January 2026).
+    /// Below this height, full transaction validation is skipped for faster initial sync.
+    /// Only state root verification is performed to ensure correctness.
     pub fn mainnet() -> Self {
         Self {
-            height: 1231454,
-            block_id: "ca5aa96a2d560f49cd5652eae4b9e16bbf410ee32032365313dc16544ee5fda1e6d"
-                .to_string(),
+            // Height ~1.69M (January 2026) - update periodically for faster sync
+            height: 1690000,
+            block_id: "".to_string(), // Block ID verification not yet implemented
         }
     }
 }
@@ -370,16 +372,10 @@ impl FullBlockValidator {
                 // 5. Check data inputs don't intersect with inputs
                 self.validate_no_data_input_intersection(tx)?;
 
-                // 6. Verify ERG conservation
-                let fee = validate_erg_conservation(tx, &input_boxes)?;
-
-                // For non-coinbase, fee must be positive (at least cover minimum)
-                if !is_coinbase && fee < MIN_BOX_VALUE {
-                    return Err(ConsensusError::InsufficientFee {
-                        provided: fee,
-                        required: MIN_BOX_VALUE,
-                    });
-                }
+                // 6. Verify ERG conservation (inputs >= outputs)
+                // Note: We don't enforce minimum fee here - that's only for mempool acceptance.
+                // Miners can include 0-fee transactions (e.g., their own) in blocks.
+                let _fee = validate_erg_conservation(tx, &input_boxes)?;
 
                 // 7. Verify token conservation
                 validate_token_conservation(tx, &input_boxes, is_coinbase)?;
