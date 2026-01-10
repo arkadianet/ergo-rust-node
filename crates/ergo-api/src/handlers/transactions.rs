@@ -374,6 +374,99 @@ pub async fn get_unconfirmed_paged(
     Ok(Json(txs))
 }
 
+/// GET /transactions/unconfirmed/byOutputId/:boxId
+/// Get unconfirmed transaction that creates a specific output box.
+pub async fn get_unconfirmed_by_output_id(
+    State(state): State<AppState>,
+    Path(box_id): Path<String>,
+) -> ApiResult<Json<Option<UnconfirmedTx>>> {
+    let box_id_bytes = hex::decode(&box_id)
+        .map_err(|_| ApiError::BadRequest("Invalid box ID (hex decode failed)".to_string()))?;
+
+    // Validate box ID is exactly 32 bytes
+    if box_id_bytes.len() != 32 {
+        return Err(ApiError::BadRequest(format!(
+            "Box ID must be 32 bytes, got {}",
+            box_id_bytes.len()
+        )));
+    }
+
+    let tx = state
+        .mempool
+        .get_by_output_id(&box_id_bytes)
+        .map(|tx| UnconfirmedTx {
+            id: hex::encode(&tx.id),
+            fee: tx.fee,
+            size: tx.bytes.len(),
+        });
+
+    Ok(Json(tx))
+}
+
+/// GET /transactions/unconfirmed/byTokenId/:tokenId
+/// Get all unconfirmed transactions involving a specific token.
+pub async fn get_unconfirmed_by_token_id(
+    State(state): State<AppState>,
+    Path(token_id): Path<String>,
+) -> ApiResult<Json<Vec<UnconfirmedTx>>> {
+    let token_id_bytes = hex::decode(&token_id)
+        .map_err(|_| ApiError::BadRequest("Invalid token ID (hex decode failed)".to_string()))?;
+
+    // Validate token ID is exactly 32 bytes
+    if token_id_bytes.len() != 32 {
+        return Err(ApiError::BadRequest(format!(
+            "Token ID must be 32 bytes, got {}",
+            token_id_bytes.len()
+        )));
+    }
+
+    let txs: Vec<UnconfirmedTx> = state
+        .mempool
+        .get_by_token_id(&token_id_bytes)
+        .into_iter()
+        .map(|tx| UnconfirmedTx {
+            id: hex::encode(&tx.id),
+            fee: tx.fee,
+            size: tx.bytes.len(),
+        })
+        .collect();
+
+    Ok(Json(txs))
+}
+
+/// GET /transactions/unconfirmed/byErgoTree/:tree
+/// Get all unconfirmed transactions with outputs matching an ErgoTree hash.
+/// The `:tree` parameter should be the hex-encoded blake2b256 hash of the serialized ErgoTree.
+pub async fn get_unconfirmed_by_ergo_tree(
+    State(state): State<AppState>,
+    Path(ergo_tree): Path<String>,
+) -> ApiResult<Json<Vec<UnconfirmedTx>>> {
+    let tree_hash = hex::decode(&ergo_tree).map_err(|_| {
+        ApiError::BadRequest("Invalid ErgoTree hash (hex decode failed)".to_string())
+    })?;
+
+    // Validate ErgoTree hash is exactly 32 bytes (blake2b256 output)
+    if tree_hash.len() != 32 {
+        return Err(ApiError::BadRequest(format!(
+            "ErgoTree hash must be 32 bytes, got {}",
+            tree_hash.len()
+        )));
+    }
+
+    let txs: Vec<UnconfirmedTx> = state
+        .mempool
+        .get_by_ergo_tree(&tree_hash)
+        .into_iter()
+        .map(|tx| UnconfirmedTx {
+            id: hex::encode(&tx.id),
+            fee: tx.fee,
+            size: tx.bytes.len(),
+        })
+        .collect();
+
+    Ok(Json(txs))
+}
+
 /// Simple BLAKE2b hash for generating IDs.
 fn blake2b_hash(data: &[u8]) -> Vec<u8> {
     use blake2::digest::consts::U32;

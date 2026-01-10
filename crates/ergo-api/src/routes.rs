@@ -56,6 +56,20 @@ pub fn create_router(state: AppState) -> Router {
             "/transactions/unconfirmed",
             get(handlers::transactions::get_unconfirmed_paged),
         )
+        // NOTE: Specific routes must come BEFORE the wildcard `:id` route
+        // otherwise the wildcard will match "byOutputId", "byTokenId", etc.
+        .route(
+            "/transactions/unconfirmed/byOutputId/:boxId",
+            get(handlers::transactions::get_unconfirmed_by_output_id),
+        )
+        .route(
+            "/transactions/unconfirmed/byTokenId/:tokenId",
+            get(handlers::transactions::get_unconfirmed_by_token_id),
+        )
+        .route(
+            "/transactions/unconfirmed/byErgoTree/:tree",
+            get(handlers::transactions::get_unconfirmed_by_ergo_tree),
+        )
         .route(
             "/transactions/unconfirmed/:id",
             get(handlers::transactions::get_unconfirmed_by_id),
@@ -82,6 +96,10 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/utxo/getSnapshotsInfo",
             get(handlers::utxo::get_snapshots_info),
+        )
+        .route(
+            "/utxo/getBoxesBinaryProof",
+            post(handlers::utxo::get_boxes_binary_proof),
         )
         // Peer endpoints
         .route("/peers/all", get(handlers::peers::get_all_peers))
@@ -179,6 +197,8 @@ pub fn create_router(state: AppState) -> Router {
             "/script/executeWithContext",
             post(handlers::script::execute_with_context),
         )
+        // Node management endpoints
+        .route("/node/shutdown", post(handlers::node::shutdown))
         // Scan endpoints (EIP-0001)
         .route("/scan/register", post(handlers::scan::register))
         .route("/scan/deregister", post(handlers::scan::deregister))

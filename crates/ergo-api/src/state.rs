@@ -7,6 +7,7 @@ use ergo_state::StateManager;
 use ergo_storage::{Database, ExtraIndexer, ScanStorage};
 use ergo_wallet::{Wallet, WalletConfig};
 use std::sync::Arc;
+use tokio::sync::broadcast;
 
 /// Shared application state for API handlers.
 #[derive(Clone)]
@@ -31,6 +32,9 @@ pub struct AppState {
     pub api_key: Option<String>,
     /// Mining enabled.
     pub mining_enabled: bool,
+    /// Shutdown signal sender.
+    /// When a message is sent on this channel, the node will initiate graceful shutdown.
+    pub shutdown_signal: Option<broadcast::Sender<()>>,
 }
 
 impl AppState {
@@ -56,6 +60,7 @@ impl AppState {
             node_name,
             api_key: None,
             mining_enabled: false,
+            shutdown_signal: None,
         }
     }
 
@@ -100,5 +105,14 @@ impl AppState {
             (Some(expected), Some(provided)) => expected == provided,
             (Some(_), None) => false,
         }
+    }
+
+    /// Set the shutdown signal sender.
+    ///
+    /// The returned receiver can be used to listen for shutdown requests.
+    /// When the `/node/shutdown` endpoint is called, a message will be sent on this channel.
+    pub fn with_shutdown_signal(mut self, sender: broadcast::Sender<()>) -> Self {
+        self.shutdown_signal = Some(sender);
+        self
     }
 }

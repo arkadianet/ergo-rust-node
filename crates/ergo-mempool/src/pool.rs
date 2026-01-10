@@ -399,6 +399,74 @@ impl Mempool {
         self.output_to_tx.get(output_id).map(|r| r.clone())
     }
 
+    /// Get the transaction that creates a given output box.
+    ///
+    /// Returns the full PooledTransaction if found.
+    pub fn get_by_output_id(&self, box_id: &[u8]) -> Option<PooledTransaction> {
+        self.output_to_tx
+            .get(box_id)
+            .and_then(|tx_id| self.transactions.get(tx_id.as_slice()).map(|r| r.clone()))
+    }
+
+    /// Get all transactions involving a specific token ID.
+    ///
+    /// This parses transaction bytes to check outputs for the token.
+    /// Returns all transactions that have outputs containing the token.
+    pub fn get_by_token_id(&self, token_id: &[u8]) -> Vec<PooledTransaction> {
+        use ergo_lib::chain::transaction::Transaction;
+        use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
+
+        self.transactions
+            .iter()
+            .filter(|entry| {
+                // Parse transaction bytes and check outputs for token
+                if let Ok(tx) = Transaction::sigma_parse_bytes(&entry.value().bytes) {
+                    tx.outputs.iter().any(|output| {
+                        output.tokens.as_ref().map_or(false, |tokens| {
+                            tokens.iter().any(|t| t.token_id.as_ref() == token_id)
+                        })
+                    })
+                } else {
+                    false
+                }
+            })
+            .map(|entry| entry.value().clone())
+            .collect()
+    }
+
+    /// Get all transactions with outputs matching an ErgoTree hash.
+    ///
+    /// The `tree_hash` should be the blake2b256 hash of the serialized ErgoTree bytes.
+    /// This parses transaction bytes to check output scripts.
+    pub fn get_by_ergo_tree(&self, tree_hash: &[u8]) -> Vec<PooledTransaction> {
+        use blake2::digest::consts::U32;
+        use blake2::{Blake2b, Digest};
+        use ergo_lib::chain::transaction::Transaction;
+        use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
+
+        self.transactions
+            .iter()
+            .filter(|entry| {
+                // Parse transaction bytes and check outputs for matching ErgoTree
+                if let Ok(tx) = Transaction::sigma_parse_bytes(&entry.value().bytes) {
+                    tx.outputs.iter().any(|output| {
+                        if let Ok(tree_bytes) = output.ergo_tree.sigma_serialize_bytes() {
+                            let mut hasher = Blake2b::<U32>::new();
+                            hasher.update(&tree_bytes);
+                            let hash = hasher.finalize();
+                            hash.as_slice() == tree_hash
+                        } else {
+                            false
+                        }
+                    })
+                } else {
+                    false
+                }
+            })
+            .map(|entry| entry.value().clone())
+            .collect()
+    }
+
     /// Get transactions ordered by weight (highest first).
     ///
     /// This respects transaction dependencies: parent transactions will have

@@ -1,8 +1,49 @@
 # GAP_02: Missing/Incomplete API Endpoints
 
+## Status: IMPLEMENTED
 ## Priority: HIGH
 ## Effort: Medium
 ## Category: API
+
+---
+
+## Implementation Summary (January 2025)
+
+All originally identified missing endpoints have been implemented or were found to already exist under different names.
+
+### Endpoints That Already Existed
+| GAP Claim | Actual Endpoint | Status |
+|-----------|-----------------|--------|
+| `/transactions/feeHistogram` | `/transactions/poolHistogram` | Already existed |
+| `/transactions/recommendedFee` | `/transactions/getFee` | Already existed |
+| `/transactions/expectedWaitTime/{fee}` | `/transactions/waitTime` | Already existed |
+| `/utxo/withPool/byIds` | POST `/utxo/withPool/byIds` | Already existed |
+| `/scan/*` (7 endpoints) | All 8 scan endpoints | Already existed |
+
+### Newly Implemented Endpoints
+| Endpoint | Handler | File |
+|----------|---------|------|
+| GET `/transactions/unconfirmed/byOutputId/:boxId` | `get_unconfirmed_by_output_id` | transactions.rs |
+| GET `/transactions/unconfirmed/byTokenId/:tokenId` | `get_unconfirmed_by_token_id` | transactions.rs |
+| GET `/transactions/unconfirmed/byErgoTree/:tree` | `get_unconfirmed_by_ergo_tree` | transactions.rs |
+| POST `/utxo/getBoxesBinaryProof` | `get_boxes_binary_proof` | utxo.rs |
+| POST `/node/shutdown` | `shutdown` | node.rs |
+
+### New Mempool Query Methods
+Added to `crates/ergo-mempool/src/pool.rs`:
+- `get_by_output_id(&self, box_id: &[u8]) -> Option<PooledTransaction>`
+- `get_by_token_id(&self, token_id: &[u8]) -> Vec<PooledTransaction>`
+- `get_by_ergo_tree(&self, tree_hash: &[u8]) -> Vec<PooledTransaction>`
+
+### Files Modified
+- `crates/ergo-mempool/src/pool.rs` - Added 3 query methods
+- `crates/ergo-mempool/Cargo.toml` - Added blake2 dependency
+- `crates/ergo-api/src/handlers/transactions.rs` - Added 3 handlers
+- `crates/ergo-api/src/handlers/utxo.rs` - Added binary proof handler
+- `crates/ergo-api/src/handlers/node.rs` - Created (shutdown handler)
+- `crates/ergo-api/src/handlers/mod.rs` - Export node module
+- `crates/ergo-api/src/state.rs` - Added shutdown_signal field
+- `crates/ergo-api/src/routes.rs` - Registered 5 new routes
 
 ---
 

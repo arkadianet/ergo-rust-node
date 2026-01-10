@@ -255,3 +255,53 @@ pub async fn get_snapshots_info(
         available_manifests: vec![],
     }))
 }
+
+/// Binary proof response.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BinaryProofResponse {
+    /// Hex-encoded Merkle proof bytes.
+    pub proof: String,
+}
+
+/// POST /utxo/getBoxesBinaryProof
+/// Get binary (Merkle) proof for the existence of boxes in the UTXO set.
+///
+/// This endpoint generates a cryptographic proof that can be verified
+/// independently to confirm box existence without requiring full state.
+pub async fn get_boxes_binary_proof(
+    State(_state): State<AppState>,
+    Json(request): Json<BoxIdsRequest>,
+) -> ApiResult<Json<BinaryProofResponse>> {
+    // Rate limiting: reject requests with too many IDs
+    if request.0.len() > MAX_BATCH_SIZE {
+        return Err(ApiError::BadRequest(format!(
+            "Too many box IDs. Maximum allowed: {}, received: {}",
+            MAX_BATCH_SIZE,
+            request.0.len()
+        )));
+    }
+
+    // Validate box IDs
+    for id in &request.0 {
+        let id_bytes =
+            hex::decode(id).map_err(|_| ApiError::BadRequest(format!("Invalid box ID: {}", id)))?;
+        if id_bytes.len() != 32 {
+            return Err(ApiError::BadRequest(format!(
+                "Box ID must be 32 bytes: {}",
+                id
+            )));
+        }
+    }
+
+    // TODO: Implement actual proof generation using AVL+ tree
+    // This requires:
+    // 1. Loading the AVL+ tree state
+    // 2. Looking up each box in the tree
+    // 3. Generating a batch proof for all lookups
+    //
+    // For now, return NotImplemented error
+    Err(ApiError::NotImplemented(
+        "Binary proof generation requires AVL+ tree integration".to_string(),
+    ))
+}
