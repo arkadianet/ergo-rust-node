@@ -41,6 +41,10 @@ pub enum ConsensusError {
     #[error("Block cost exceeded: {cost}, max {max}")]
     BlockCostExceeded { cost: u64, max: u64 },
 
+    /// Transaction cost exceeded.
+    #[error("Transaction cost exceeded: {cost}, max {max} (tx: {tx_id})")]
+    TransactionCostExceeded { tx_id: String, cost: u64, max: u64 },
+
     /// Invalid extension.
     #[error("Invalid extension: {0}")]
     InvalidExtension(String),

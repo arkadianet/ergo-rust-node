@@ -24,6 +24,7 @@
 mod autolykos;
 pub mod block;
 pub mod block_validation;
+pub mod cost;
 mod difficulty;
 mod error;
 pub mod nipopow;
@@ -41,6 +42,10 @@ pub use block::{
 };
 pub use block_validation::{
     BlockValidationResult, CreatedBox, FullBlockValidator, SpentBox, ValidatedStateChange,
+};
+pub use cost::{
+    calculate_base_cost, estimate_tx_cost, CostAccumulator, CostConstants, CostError,
+    TransactionCostResult,
 };
 pub use difficulty::{calculate_required_difficulty, DifficultyAdjustment, HeaderForDifficulty};
 pub use error::{ConsensusError, ConsensusResult};
@@ -77,6 +82,24 @@ pub mod params {
 
     /// Maximum block cost (computational units).
     pub const MAX_BLOCK_COST: u64 = 8_000_000;
+
+    /// Maximum transaction cost (computational units).
+    ///
+    /// Limits script complexity per transaction to prevent
+    /// resource exhaustion attacks.
+    pub const MAX_TX_COST: u64 = 1_000_000;
+
+    /// Base cost per input (UTXO lookup + proof verification setup).
+    pub const INPUT_BASE_COST: u64 = 2_000;
+
+    /// Base cost per output (serialization + storage prep).
+    pub const OUTPUT_BASE_COST: u64 = 100;
+
+    /// Base cost per data input (read-only UTXO lookup).
+    pub const DATA_INPUT_COST: u64 = 100;
+
+    /// Cost per byte of transaction size.
+    pub const SIZE_COST_PER_BYTE: u64 = 2;
 
     /// Storage rent period in blocks (~4 years).
     pub const STORAGE_RENT_PERIOD: u32 = 1_051_200;

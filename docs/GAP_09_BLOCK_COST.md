@@ -1,8 +1,53 @@
 # GAP_09: Block Cost Validation
 
+## Status: IMPLEMENTED
 ## Priority: MEDIUM
 ## Effort: Medium
 ## Category: Consensus
+
+---
+
+## Implementation Summary (January 2025)
+
+Block cost validation has been fully implemented with the following components:
+
+### Files Created
+- `crates/ergo-consensus/src/cost.rs` - Cost constants, CostAccumulator, and utilities
+
+### Files Modified
+- `crates/ergo-consensus/src/lib.rs` - Added cost module exports and params constants
+- `crates/ergo-consensus/src/tx_validation.rs` - Enhanced with base cost calculation and tx cost limits
+- `crates/ergo-consensus/src/block_validation.rs` - Added transaction cost limit checking
+- `crates/ergo-consensus/src/error.rs` - Added TransactionCostExceeded error variant
+- `crates/ergo-mempool/src/pool.rs` - Added estimated_cost field and cost_adjusted_priority()
+
+### Key Components Implemented
+
+1. **Cost Constants** (`params` module and `cost.rs`):
+   - `MAX_TX_COST`: 1,000,000 (max cost per transaction)
+   - `MAX_BLOCK_COST`: 8,000,000 (max cost per block)
+   - `INPUT_BASE_COST`: 2,000 (per input)
+   - `OUTPUT_BASE_COST`: 100 (per output)
+   - `DATA_INPUT_COST`: 100 (per data input)
+   - `SIZE_COST_PER_BYTE`: 2 (per byte of tx size)
+
+2. **CostAccumulator** - Tracks costs during validation with limit checking
+
+3. **Transaction Cost Calculation** - `TxVerificationResult` now includes:
+   - `script_cost`: Cost from ErgoScript interpreter
+   - `total_cost`: Base cost + size cost + script cost
+
+4. **Block Validation** - Validates both:
+   - Individual transaction cost limits (MAX_TX_COST)
+   - Cumulative block cost limits (MAX_BLOCK_COST)
+
+5. **Mempool Integration**:
+   - `PooledTransaction.estimated_cost` field for cost tracking
+   - `cost_adjusted_priority()` method for cost-aware ordering
+
+### Tests Added
+- 19 tests in `cost.rs` for CostAccumulator and cost calculation
+- 5 tests in `pool.rs` for cost-adjusted priority
 
 ---
 
@@ -21,13 +66,14 @@ In `crates/ergo-consensus/src/tx_validation.rs`:
 - Script execution via ergotree-interpreter
 - Token and ERG conservation
 - Basic validation framework
+- **NEW**: Base cost calculation and transaction cost limits
 
-### What's Missing
+### What Was Missing (Now Implemented)
 
-1. **Script execution cost tracking** during validation
-2. **Transaction cost limits** enforcement
-3. **Block cost accumulation** across all transactions
-4. **Cost limit constants** (JIT cost, script cost)
+1. ✅ **Script execution cost tracking** during validation
+2. ✅ **Transaction cost limits** enforcement
+3. ✅ **Block cost accumulation** across all transactions
+4. ✅ **Cost limit constants** (JIT cost, script cost)
 5. **Complexity-based mempool ordering**
 
 ---

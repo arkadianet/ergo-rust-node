@@ -163,6 +163,7 @@ pub async fn submit_transaction(
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_millis() as u64,
+        estimated_cost: None, // Cost estimated during validation
     };
 
     state.mempool.add(pooled)?;

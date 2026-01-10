@@ -11,7 +11,7 @@
 //! any state changes are applied.
 
 use crate::block::{BlockTransactions, FullBlock, Header};
-use crate::params::{MAX_BLOCK_COST, MIN_BOX_VALUE};
+use crate::params::{MAX_BLOCK_COST, MAX_TX_COST, MIN_BOX_VALUE};
 use crate::tx_validation::{validate_erg_conservation, validate_token_conservation, TxVerifier};
 use crate::{ConsensusError, ConsensusResult};
 use ergo_chain_types::PreHeader;
@@ -407,8 +407,17 @@ impl FullBlockValidator {
                             });
                         }
 
+                        // Check individual transaction cost limit
+                        if result.total_cost > MAX_TX_COST {
+                            return Err(ConsensusError::TransactionCostExceeded {
+                                tx_id: hex::encode(&tx_id),
+                                cost: result.total_cost,
+                                max: MAX_TX_COST,
+                            });
+                        }
+
                         // Accumulate cost
-                        total_cost = total_cost.saturating_add(result.cost);
+                        total_cost = total_cost.saturating_add(result.total_cost);
 
                         // Check block cost limit
                         if total_cost > self.max_block_cost {

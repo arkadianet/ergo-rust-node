@@ -57,6 +57,37 @@ pub struct PooledTransaction {
     pub outputs: Vec<Vec<u8>>,
     /// Arrival timestamp.
     pub arrival_time: u64,
+    /// Estimated transaction cost (base + size, excludes script execution).
+    /// Used for cost-adjusted priority ordering.
+    pub estimated_cost: Option<u64>,
+}
+
+impl PooledTransaction {
+    /// Calculate cost-adjusted priority for mempool ordering.
+    ///
+    /// Higher value = higher priority. Transactions with higher fee
+    /// per unit cost are prioritized.
+    ///
+    /// Formula: fee / (estimated_cost + size_penalty)
+    pub fn cost_adjusted_priority(&self) -> f64 {
+        let cost = self.estimated_cost.unwrap_or(1000); // Default minimum cost
+        let size_penalty = self.bytes.len() as u64;
+
+        if cost + size_penalty == 0 {
+            return 0.0;
+        }
+
+        self.fee as f64 / (cost + size_penalty) as f64
+    }
+
+    /// Get fee per byte.
+    pub fn fee_per_byte(&self) -> f64 {
+        if self.bytes.is_empty() {
+            0.0
+        } else {
+            self.fee as f64 / self.bytes.len() as f64
+        }
+    }
 }
 
 /// Mempool statistics.
@@ -596,6 +627,7 @@ mod tests {
             inputs: vec![vec![id, 1]],
             outputs: vec![vec![id, 2]], // Each tx creates an output
             arrival_time: 1000,
+            estimated_cost: None,
         }
     }
 
@@ -613,6 +645,7 @@ mod tests {
             inputs,
             outputs,
             arrival_time: 1000 + id as u64,
+            estimated_cost: None,
         }
     }
 
@@ -638,6 +671,7 @@ mod tests {
             inputs: vec![vec![10, 10]],
             outputs: vec![vec![1, 1]],
             arrival_time: 1000,
+            estimated_cost: None,
         };
 
         let tx2 = PooledTransaction {
@@ -647,6 +681,7 @@ mod tests {
             inputs: vec![vec![10, 10]], // Same input!
             outputs: vec![vec![2, 2]],
             arrival_time: 1001,
+            estimated_cost: None,
         };
 
         pool.add(tx1).unwrap();
@@ -867,6 +902,7 @@ mod tests {
             inputs: vec![vec![10, 10]],
             outputs: vec![vec![1, 1]],
             arrival_time: 1000,
+            estimated_cost: None,
         };
 
         pool.add(tx1).unwrap();
@@ -883,6 +919,7 @@ mod tests {
             inputs: vec![vec![10, 10]],
             outputs: vec![vec![2, 2]],
             arrival_time: 1001,
+            estimated_cost: None,
         };
 
         assert!(pool.add(tx2).is_ok());
@@ -1002,6 +1039,7 @@ mod tests {
             inputs: vec![vec![10, 10]],
             outputs: vec![vec![1, 1]],
             arrival_time: 1000,
+            estimated_cost: None,
         };
 
         let tx2 = PooledTransaction {
@@ -1011,6 +1049,7 @@ mod tests {
             inputs: vec![vec![20, 20]],
             outputs: vec![vec![2, 2]],
             arrival_time: 1001,
+            estimated_cost: None,
         };
 
         pool.add(tx1).unwrap();
@@ -1038,6 +1077,7 @@ mod tests {
             inputs: vec![vec![0, 0]],
             outputs: vec![vec![1, 1], vec![1, 2]],
             arrival_time: 1000,
+            estimated_cost: None,
         };
 
         pool.add(tx).unwrap();
@@ -1058,6 +1098,7 @@ mod tests {
             inputs: vec![vec![0, 0]],
             outputs: vec![vec![1, 1]],
             arrival_time: 1000,
+            estimated_cost: None,
         };
 
         pool.add(tx).unwrap();
@@ -1065,5 +1106,106 @@ mod tests {
 
         pool.remove(&[1]).unwrap();
         assert!(pool.get_creating_tx(&[1, 1]).is_none());
+    }
+
+    // ============ Cost-Adjusted Priority Tests ============
+
+    #[test]
+    fn test_cost_adjusted_priority_basic() {
+        // Higher fee with same cost = higher priority
+        let tx1 = PooledTransaction {
+            id: vec![1],
+            bytes: vec![0; 100],
+            fee: 1000,
+            inputs: vec![],
+            outputs: vec![],
+            arrival_time: 1000,
+            estimated_cost: Some(5000),
+        };
+
+        let tx2 = PooledTransaction {
+            id: vec![2],
+            bytes: vec![0; 100],
+            fee: 2000,
+            inputs: vec![],
+            outputs: vec![],
+            arrival_time: 1000,
+            estimated_cost: Some(5000),
+        };
+
+        assert!(tx2.cost_adjusted_priority() > tx1.cost_adjusted_priority());
+    }
+
+    #[test]
+    fn test_cost_adjusted_priority_high_cost() {
+        // Same fee but higher cost = lower priority
+        let tx_low_cost = PooledTransaction {
+            id: vec![1],
+            bytes: vec![0; 100],
+            fee: 1000,
+            inputs: vec![],
+            outputs: vec![],
+            arrival_time: 1000,
+            estimated_cost: Some(1000),
+        };
+
+        let tx_high_cost = PooledTransaction {
+            id: vec![2],
+            bytes: vec![0; 100],
+            fee: 1000,
+            inputs: vec![],
+            outputs: vec![],
+            arrival_time: 1000,
+            estimated_cost: Some(10000),
+        };
+
+        assert!(tx_low_cost.cost_adjusted_priority() > tx_high_cost.cost_adjusted_priority());
+    }
+
+    #[test]
+    fn test_cost_adjusted_priority_no_estimate() {
+        // Without cost estimate, uses default
+        let tx = PooledTransaction {
+            id: vec![1],
+            bytes: vec![0; 100],
+            fee: 1000,
+            inputs: vec![],
+            outputs: vec![],
+            arrival_time: 1000,
+            estimated_cost: None,
+        };
+
+        let priority = tx.cost_adjusted_priority();
+        assert!(priority > 0.0);
+    }
+
+    #[test]
+    fn test_fee_per_byte() {
+        let tx = PooledTransaction {
+            id: vec![1],
+            bytes: vec![0; 200],
+            fee: 1000,
+            inputs: vec![],
+            outputs: vec![],
+            arrival_time: 1000,
+            estimated_cost: None,
+        };
+
+        assert!((tx.fee_per_byte() - 5.0).abs() < 0.001); // 1000 / 200 = 5.0
+    }
+
+    #[test]
+    fn test_fee_per_byte_empty() {
+        let tx = PooledTransaction {
+            id: vec![1],
+            bytes: vec![],
+            fee: 1000,
+            inputs: vec![],
+            outputs: vec![],
+            arrival_time: 1000,
+            estimated_cost: None,
+        };
+
+        assert_eq!(tx.fee_per_byte(), 0.0);
     }
 }

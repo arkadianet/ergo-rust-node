@@ -5,7 +5,9 @@
 //! - ErgoScript execution for spending conditions
 //! - Token conservation rules
 //! - Fee validation
+//! - Transaction cost calculation and limits
 
+use crate::cost::{calculate_base_cost, CostConstants};
 use crate::{ConsensusError, ConsensusResult};
 use ergo_chain_types::{Header, PreHeader};
 use ergo_lib::chain::transaction::Transaction;
@@ -13,6 +15,7 @@ use ergo_lib::ergotree_ir::chain::context::{Context, ContextExtensionProvider, T
 use ergo_lib::ergotree_ir::chain::context_extension::ContextExtension;
 use ergo_lib::ergotree_ir::chain::ergo_box::ErgoBox;
 use ergo_lib::ergotree_ir::ergo_tree::ErgoTreeVersion;
+use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
 use ergotree_interpreter::sigma_protocol::prover::ProofBytes;
 use ergotree_interpreter::sigma_protocol::verifier::Verifier;
 use std::cell::Cell;
@@ -34,8 +37,10 @@ impl<'a> ContextExtensionProvider for TxContextExtensionProvider<'a> {
 pub struct TxVerificationResult {
     /// Whether the transaction is valid.
     pub valid: bool,
-    /// Total cost of script execution.
-    pub cost: u64,
+    /// Total cost of script execution (from interpreter).
+    pub script_cost: u64,
+    /// Total transaction cost (base + size + script).
+    pub total_cost: u64,
     /// Error message if invalid.
     pub error: Option<String>,
 }
@@ -81,7 +86,15 @@ impl TxVerifier {
         input_boxes: &[ErgoBox],
         data_input_boxes: &[ErgoBox],
     ) -> TxVerificationResult {
-        let mut total_cost = 0u64;
+        let mut script_cost = 0u64;
+
+        // Calculate base cost (inputs, outputs, data inputs, size)
+        let num_inputs = tx.inputs.len();
+        let num_outputs = tx.outputs.len();
+        let num_data_inputs = tx.data_inputs.as_ref().map_or(0, |di| di.len());
+        let tx_size = tx.sigma_serialize_bytes().map_or(0, |b| b.len());
+
+        let base_cost = calculate_base_cost(num_inputs, num_outputs, num_data_inputs, tx_size);
 
         // Convert outputs to a slice
         let outputs: Vec<ErgoBox> = tx.outputs.iter().cloned().collect();
@@ -95,7 +108,8 @@ impl TxVerifier {
                 Err(_) => {
                     return TxVerificationResult {
                         valid: false,
-                        cost: 0,
+                        script_cost: 0,
+                        total_cost: base_cost,
                         error: Some("Invalid number of data inputs".to_string()),
                     }
                 }
@@ -109,7 +123,8 @@ impl TxVerifier {
             Err(_) => {
                 return TxVerificationResult {
                     valid: false,
-                    cost: 0,
+                    script_cost: 0,
+                    total_cost: base_cost,
                     error: Some("Invalid number of inputs".to_string()),
                 }
             }
@@ -163,7 +178,23 @@ impl TxVerifier {
             // Verify the spending proof
             match self.verify(ergo_tree, &ctx, proof, message) {
                 Ok(result) => {
-                    total_cost += result.cost;
+                    script_cost += result.cost;
+
+                    // Check if we've exceeded the transaction cost limit
+                    let current_total = base_cost.saturating_add(script_cost);
+                    if current_total > CostConstants::MAX_TX_COST {
+                        return TxVerificationResult {
+                            valid: false,
+                            script_cost,
+                            total_cost: current_total,
+                            error: Some(format!(
+                                "Transaction cost {} exceeds limit {}",
+                                current_total,
+                                CostConstants::MAX_TX_COST
+                            )),
+                        };
+                    }
+
                     if !result.result {
                         debug!(
                             input_idx = idx,
@@ -172,7 +203,8 @@ impl TxVerifier {
                         );
                         return TxVerificationResult {
                             valid: false,
-                            cost: total_cost,
+                            script_cost,
+                            total_cost: base_cost.saturating_add(script_cost),
                             error: Some(format!("Script verification failed for input {}", idx)),
                         };
                     }
@@ -185,18 +217,24 @@ impl TxVerifier {
                     );
                     return TxVerificationResult {
                         valid: false,
-                        cost: total_cost,
+                        script_cost,
+                        total_cost: base_cost.saturating_add(script_cost),
                         error: Some(format!("Script error for input {}: {}", idx, e)),
                     };
                 }
             }
         }
 
-        debug!(cost = total_cost, "Transaction verified successfully");
+        let total_cost = base_cost.saturating_add(script_cost);
+        debug!(
+            script_cost,
+            base_cost, total_cost, "Transaction verified successfully"
+        );
 
         TxVerificationResult {
             valid: true,
-            cost: total_cost,
+            script_cost,
+            total_cost,
             error: None,
         }
     }
