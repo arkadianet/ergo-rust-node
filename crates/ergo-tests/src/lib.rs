@@ -32,5 +32,11 @@ mod sync_tests;
 #[cfg(test)]
 mod node_tests;
 
+#[cfg(test)]
+mod validation_tests;
+
+#[cfg(test)]
+mod state_tests;
+
 pub use generators::*;
 pub use harness::*;

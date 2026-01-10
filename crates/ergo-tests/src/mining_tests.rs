@@ -586,7 +586,10 @@ fn test_miner_config_default() {
     assert!(!config.internal_mining);
     assert!(config.external_mining);
     assert!(config.reward_address.is_empty());
-    assert_eq!(config.threads, 1);
+    // threads = 0 means auto-detect based on CPU cores
+    assert_eq!(config.threads, 0);
+    // effective_threads should return at least 1
+    assert!(config.effective_threads() >= 1);
 }
 
 #[test]
@@ -596,6 +599,7 @@ fn test_miner_config_custom() {
         external_mining: false,
         reward_address: "test_address".to_string(),
         threads: 4,
+        ..Default::default()
     };
 
     assert!(config.internal_mining);
@@ -611,6 +615,7 @@ fn test_miner_config_clone() {
         external_mining: true,
         reward_address: "cloned_address".to_string(),
         threads: 8,
+        ..Default::default()
     };
 
     let cloned = config.clone();
