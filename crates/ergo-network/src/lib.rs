@@ -7,18 +7,23 @@
 //! - Ergo P2P protocol messages
 //! - Peer discovery and management
 //! - Connection pool and scoring
+//! - Decline table for spam protection
 
 mod codec;
 mod connection;
+mod decline;
 pub mod discovery;
 mod error;
 mod handshake;
 mod message;
 mod peer;
+mod penalties;
+mod scoring;
 mod service;
 
 pub use codec::{MessageCodec, PeerAddress, PeerFeature};
 pub use connection::{Connection, ConnectionConfig};
+pub use decline::{DeclineTable, ModifierId};
 pub use discovery::{NetworkType, PeerDiscovery, MAINNET_DNS_SEEDS, TESTNET_DNS_SEEDS};
 pub use error::{NetworkError, NetworkResult};
 pub use handshake::{DeclaredAddress, HandshakeCodec, HandshakeData, PeerSpec};
@@ -27,7 +32,9 @@ pub use message::{
     ModifierItem, ModifierRequest, SnapshotsInfo, SyncInfo, UtxoChunkData, UtxoChunkRequest,
     MAX_CHUNK_SIZE, MAX_MANIFEST_SIZE, MAX_SNAPSHOTS_INFO_ENTRIES,
 };
-pub use peer::{PeerId, PeerInfo, PeerManager, PeerState};
+pub use peer::{PeerId, PeerInfo, PeerManager, PeerManagerConfig, PeerScoreStats, PeerState};
+pub use penalties::{Penalties, PenaltyReason, Rewards};
+pub use scoring::PeerScore;
 pub use service::{NetworkCommand, NetworkConfig, NetworkEvent, NetworkService, PeerHandle};
 
 /// Default P2P port.
