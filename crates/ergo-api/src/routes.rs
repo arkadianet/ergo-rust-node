@@ -33,12 +33,28 @@ pub fn create_router(state: AppState) -> Router {
             post(handlers::transactions::submit_transaction),
         )
         .route(
+            "/transactions/check",
+            post(handlers::transactions::check_transaction),
+        )
+        .route(
+            "/transactions/poolHistogram",
+            get(handlers::transactions::get_fee_histogram),
+        )
+        .route(
+            "/transactions/getFee",
+            get(handlers::transactions::get_recommended_fee),
+        )
+        .route(
+            "/transactions/waitTime",
+            get(handlers::transactions::get_wait_time),
+        )
+        .route(
             "/transactions/:id",
             get(handlers::transactions::get_transaction),
         )
         .route(
             "/transactions/unconfirmed",
-            get(handlers::transactions::get_unconfirmed),
+            get(handlers::transactions::get_unconfirmed_paged),
         )
         .route(
             "/transactions/unconfirmed/:id",
@@ -47,8 +63,25 @@ pub fn create_router(state: AppState) -> Router {
         // UTXO endpoints
         .route("/utxo/byId/:id", get(handlers::utxo::get_box_by_id))
         .route(
+            "/utxo/byIdBinary/:id",
+            get(handlers::utxo::get_box_binary_by_id),
+        )
+        .route(
             "/utxo/byAddress/:address",
             get(handlers::utxo::get_boxes_by_address),
+        )
+        .route(
+            "/utxo/withPool/byId/:id",
+            get(handlers::utxo::get_box_with_pool),
+        )
+        .route(
+            "/utxo/withPool/byIds",
+            post(handlers::utxo::get_boxes_with_pool),
+        )
+        .route("/utxo/genesis", get(handlers::utxo::get_genesis_boxes))
+        .route(
+            "/utxo/getSnapshotsInfo",
+            get(handlers::utxo::get_snapshots_info),
         )
         // Peer endpoints
         .route("/peers/all", get(handlers::peers::get_all_peers))
@@ -146,6 +179,18 @@ pub fn create_router(state: AppState) -> Router {
             "/script/executeWithContext",
             post(handlers::script::execute_with_context),
         )
+        // Scan endpoints (EIP-0001)
+        .route("/scan/register", post(handlers::scan::register))
+        .route("/scan/deregister", post(handlers::scan::deregister))
+        .route("/scan/listAll", get(handlers::scan::list_all))
+        .route(
+            "/scan/unspentBoxes/:scanId",
+            get(handlers::scan::unspent_boxes),
+        )
+        .route("/scan/spentBoxes/:scanId", get(handlers::scan::spent_boxes))
+        .route("/scan/stopTracking", post(handlers::scan::stop_tracking))
+        .route("/scan/addBox", post(handlers::scan::add_box))
+        .route("/scan/p2sRule", post(handlers::scan::p2s_rule))
         // Blockchain indexer endpoints (optional - requires extra indexing enabled)
         .route(
             "/blockchain/indexedHeight",

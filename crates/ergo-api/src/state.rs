@@ -4,7 +4,7 @@ use ergo_mempool::Mempool;
 use ergo_mining::CandidateGenerator;
 use ergo_network::PeerManager;
 use ergo_state::StateManager;
-use ergo_storage::ExtraIndexer;
+use ergo_storage::{Database, ExtraIndexer, ScanStorage};
 use ergo_wallet::{Wallet, WalletConfig};
 use std::sync::Arc;
 
@@ -23,6 +23,8 @@ pub struct AppState {
     pub wallet: Option<Arc<Wallet>>,
     /// Extra indexer (optional).
     pub indexer: Option<Arc<ExtraIndexer>>,
+    /// Scan storage (optional).
+    pub scan_storage: Option<Arc<ScanStorage<Database>>>,
     /// Node name.
     pub node_name: String,
     /// API key (if required).
@@ -50,6 +52,7 @@ impl AppState {
             candidate_generator,
             wallet: None,
             indexer: None,
+            scan_storage: None,
             node_name,
             api_key: None,
             mining_enabled: false,
@@ -59,6 +62,12 @@ impl AppState {
     /// Enable extra indexer.
     pub fn with_indexer(mut self, indexer: Arc<ExtraIndexer>) -> Self {
         self.indexer = Some(indexer);
+        self
+    }
+
+    /// Enable scan storage.
+    pub fn with_scan_storage(mut self, scan_storage: Arc<ScanStorage<Database>>) -> Self {
+        self.scan_storage = Some(scan_storage);
         self
     }
 

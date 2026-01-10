@@ -23,6 +23,7 @@ mod batch;
 mod database;
 mod error;
 pub mod indexer;
+pub mod scan;
 
 pub use batch::WriteBatch;
 pub use database::{ColumnFamily, Database};
@@ -30,6 +31,9 @@ pub use error::{StorageError, StorageResult};
 pub use indexer::{
     BalanceInfo, ExtraIndexer, IndexedErgoAddress, IndexedErgoBox, IndexedErgoTransaction,
     IndexedToken, IndexerConfig, IndexerState,
+};
+pub use scan::{
+    Scan, ScanBox, ScanId, ScanRequest, ScanStorage, ScanWalletInteraction, ScanningPredicate,
 };
 
 /// Storage trait for abstracting database operations.

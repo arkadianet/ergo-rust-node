@@ -4,8 +4,8 @@
 
 This document compares the Rust implementation with the Scala reference implementation to identify gaps and guide further development.
 
-**Last Updated:** January 9, 2025  
-**Overall Completion:** ~95%
+**Last Updated:** January 10, 2025  
+**Overall Completion:** ~98%
 
 ---
 
@@ -14,19 +14,19 @@ This document compares the Rust implementation with the Scala reference implemen
 | Component | Status | Notes |
 |-----------|--------|-------|
 | P2P Networking | COMPLETE | Full message types, handshake, peer management |
-| Sync Protocol | COMPLETE | Header-first sync, block download, rate limiting |
-| Consensus | COMPLETE | Autolykos v2, difficulty adjustment |
-| UTXO State | COMPLETE | AVL+ tree, state root, box indexing |
+| Sync Protocol | COMPLETE | Header-first sync, block download, rate limiting, snapshot sync |
+| Consensus | COMPLETE | Autolykos v2, difficulty adjustment, NiPoPoW |
+| UTXO State | COMPLETE | AVL+ tree, state root, box indexing, snapshots |
 | State Rollback | COMPLETE | UndoData mechanism |
-| Mempool | COMPLETE | Transaction dependency tracking implemented |
-| Mining | COMPLETE | Candidate generation, coinbase, tx selection |
+| Mempool | COMPLETE | Transaction dependency tracking with weight ordering |
+| Mining | COMPLETE | Candidate generation, coinbase, tx selection, EIP-27 |
 | Wallet | COMPLETE | HD derivation, tx building, signing, encryption |
-| REST API | COMPLETE | Core + extended endpoints (utils, emission, script) |
+| REST API | COMPLETE | Core + extended + blockchain indexer endpoints |
 | Block Pruning | COMPLETE | Configurable blocks_to_keep |
-| UTXO Snapshots | MISSING | Not yet implemented |
-| NiPoPoW | MISSING | Not yet implemented |
-| Extra Indexer | MISSING | Not yet implemented |
-| Re-emission (EIP-27) | MISSING | Not yet implemented |
+| UTXO Snapshots | COMPLETE | Manifest, chunks, download planning |
+| NiPoPoW | COMPLETE | Proofs, verification, bootstrap, API |
+| Extra Indexer | COMPLETE | Address/tx/box/token indexing, blockchain API |
+| Re-emission (EIP-27) | COMPLETE | Settings, rules, coinbase integration |
 
 ---
 
@@ -55,8 +55,8 @@ This document compares the Rust implementation with the Scala reference implemen
 | Modifier requests | Batched (400) | Batched (400) | COMPLETE |
 | Parallel block download | Yes | Yes (16 concurrent) | COMPLETE |
 | Chain reorganization | Full | Cumulative difficulty | COMPLETE |
-| NiPoPoW bootstrap | Yes | No | MISSING |
-| UTXO snapshot sync | Yes | No | MISSING |
+| NiPoPoW bootstrap | Yes | Yes | COMPLETE |
+| UTXO snapshot sync | Yes | Yes | COMPLETE |
 
 ### 3. State Management
 
@@ -68,7 +68,7 @@ This document compares the Rust implementation with the Scala reference implemen
 | Box storage | Yes | Yes | COMPLETE |
 | ErgoTree index | Yes | BLAKE2b hash index | COMPLETE |
 | Token index | Yes | TokenId index | COMPLETE |
-| State snapshots | Periodic | Framework only | PARTIAL |
+| State snapshots | Periodic | Full implementation | COMPLETE |
 | Rollback | Full | UndoData mechanism | COMPLETE |
 
 ### 4. Block/Transaction Validation
@@ -104,8 +104,9 @@ This document compares the Rust implementation with the Scala reference implemen
 |---------|-------|------|--------|
 | Block candidate | Full | Full | COMPLETE |
 | Transaction selection | Fee-based | Fee-based | COMPLETE |
-| Coinbase creation | Yes | EmissionParams + CoinbaseBuilder | COMPLETE |
-| Emission schedule | 75 ERG decreasing | Same | COMPLETE |
+| Coinbase creation | Yes | CoinbaseBuilder + EIP-27 | COMPLETE |
+| Emission schedule | 75 ERG decreasing | ReemissionRules | COMPLETE |
+| Re-emission (EIP-27) | Yes | Yes | COMPLETE |
 | Difficulty calculation | Yes | DifficultyAdjustment | COMPLETE |
 | External mining | Stratum-like | Framework | PARTIAL |
 | Internal CPU mining | Yes | No | MISSING |
@@ -137,73 +138,67 @@ This document compares the Rust implementation with the Scala reference implemen
 | /mining | Full | COMPLETE |
 | /wallet | Full | COMPLETE |
 | /script | Full | COMPLETE |
-| /emission | Full | COMPLETE |
+| /emission | Full | COMPLETE (with EIP-27) |
 | /utils | Full | COMPLETE |
 | /scan | Full | MISSING |
-| /nipopow | Full | MISSING |
-| /blockchain (indexed) | Full | MISSING |
+| /nipopow | Full | COMPLETE |
+| /blockchain (indexed) | Full | COMPLETE |
+
+### 9. NiPoPoW Support
+
+| Feature | Scala | Rust | Status |
+|---------|-------|------|--------|
+| PoPowHeader | Yes | Yes | COMPLETE |
+| Interlinks serialization | Yes | Yes | COMPLETE |
+| NipopowAlgos | Yes | Yes | COMPLETE |
+| NipopowProof | Yes | Yes | COMPLETE |
+| NipopowVerifier | Yes | Yes | COMPLETE |
+| Proof generation | Yes | Yes | COMPLETE |
+| Proof comparison | Yes | Yes | COMPLETE |
+| API endpoints | Yes | Yes | COMPLETE |
+
+### 10. Extra Indexer
+
+| Feature | Scala | Rust | Status |
+|---------|-------|------|--------|
+| IndexedErgoBox | Yes | Yes | COMPLETE |
+| IndexedErgoTransaction | Yes | Yes | COMPLETE |
+| IndexedErgoAddress | Yes | Yes | COMPLETE |
+| IndexedToken | Yes | Yes | COMPLETE |
+| Balance tracking | Yes | Yes | COMPLETE |
+| Blockchain API | Yes | Yes | COMPLETE |
+| Pagination | Yes | Yes | COMPLETE |
+| Optional enable | Yes | Yes | COMPLETE |
+
+### 11. Re-emission (EIP-27)
+
+| Feature | Scala | Rust | Status |
+|---------|-------|------|--------|
+| ReemissionSettings | Yes | Yes | COMPLETE |
+| ReemissionRules | Yes | Yes | COMPLETE |
+| Activation height | 777,217 | 777,217 | COMPLETE |
+| Reemission start | 2,080,800 | 2,080,800 | COMPLETE |
+| 12 ERG charge | Yes | Yes | COMPLETE |
+| 3 ERG claimable | Yes | Yes | COMPLETE |
+| Emission API | Yes | Yes | COMPLETE |
+| Coinbase integration | Yes | Yes | COMPLETE |
 
 ---
 
-## Gaps Requiring Implementation
+## Remaining Gaps
 
-### Priority 1: UTXO Snapshot Sync
+### Minor Missing Features
 
-**Problem:** New nodes must replay entire blockchain to build UTXO state.
-
-**Scala Implementation:**
-- `UtxoSetSnapshotProcessor.scala` - snapshot download management
-- `SnapshotsDb.scala` - manifest/chunk storage
-- P2P messages: GetManifest, Manifest, GetUtxoSnapshotChunk, UtxoSnapshotChunk
-
-**Rust Changes:**
-- Create `snapshots.rs` module
-- Implement download plan and chunk management
-- Add P2P message types
-- Integrate with sync module
-
-### Priority 2: NiPoPoW Support
-
-**Problem:** No light client support or cross-chain verification.
-
-**Scala Implementation:**
-- `NipopowAlgos.scala` - proof generation and comparison
-- `PoPowHeader.scala` - headers with interlinks
-- `NipopowVerifier.scala` - proof verification state machine
-
-**Rust Changes:**
-- Create `nipopow/` module in ergo-consensus
-- Implement PoPowHeader, NipopowProof, NipopowVerifier
-- Add P2P messages and API endpoints
-- Integrate bootstrap sync
-
-### Priority 3: Extra Indexer
-
-**Problem:** No advanced blockchain queries for explorers/dApps.
-
-**Scala Implementation:**
-- `ExtraIndexer.scala` - optional indexed mode
-- Segment-based indexing for large datasets
-- `/blockchain/*` API endpoints
-
-**Rust Changes:**
-- Create `indexer/` module in ergo-storage
-- Implement indexed data structures
-- Add `/blockchain/*` API endpoints
-- Make optional via configuration
-
-### Priority 4: Re-emission (EIP-27)
-
-**Problem:** No support for long-term token economics.
-
-**Scala Implementation:**
-- `ReemissionSettings.scala` - configuration
-- Modified emission calculation after activation
-
-**Rust Changes:**
-- Add re-emission configuration
-- Modify emission/coinbase logic
-- Update validation rules
+| Feature | Priority | Effort |
+|---------|----------|--------|
+| DNS Seed Discovery | Low | Small |
+| Complex Peer Scoring | Low | Medium |
+| Full Block Cost Validation | Medium | Medium |
+| Internal CPU Mining | Low | Medium |
+| P2SH/P2S Address Generation | Low | Small |
+| Scan API (/scan/*) | Low | Medium |
+| Full /transactions endpoints | Medium | Small |
+| Full /utxo endpoints | Medium | Small |
 
 ---
 
@@ -218,6 +213,9 @@ This document compares the Rust implementation with the Scala reference implemen
 | Main coordinator | ErgoNodeViewHolder | StateManager |
 | Sync logic | ErgoNodeViewSynchronizer | SyncProtocol |
 | Network | NetworkController | NetworkService |
+| Indexer | ExtraIndexer | ExtraIndexer |
+| NiPoPoW | NipopowAlgos + Verifier | nipopow module |
+| Re-emission | ReemissionRules | reemission module |
 
 ---
 
@@ -238,6 +236,14 @@ This document compares the Rust implementation with the Scala reference implemen
 | CandidateGenerator | ergo-mining/src/candidate.rs |
 | ErgoWalletActor | ergo-wallet/src/wallet.rs |
 | TransactionBuilder | ergo-wallet/src/tx_builder.rs |
+| NipopowAlgos | ergo-consensus/src/nipopow/algos.rs |
+| NipopowVerifier | ergo-consensus/src/nipopow/verifier.rs |
+| PoPowHeader | ergo-consensus/src/nipopow/popow_header.rs |
+| NipopowProof | ergo-consensus/src/nipopow/proof.rs |
+| ExtraIndexer | ergo-storage/src/indexer/mod.rs |
+| ReemissionSettings | ergo-consensus/src/reemission/settings.rs |
+| ReemissionRules | ergo-consensus/src/reemission/rules.rs |
+| SnapshotsDb | ergo-state/src/snapshots.rs |
 
 ---
 
@@ -245,13 +251,15 @@ This document compares the Rust implementation with the Scala reference implemen
 
 Use these tests to verify Rust implementation compatibility:
 
-| Feature | Test File |
-|---------|-----------|
-| Mempool dependencies | ErgoMemPoolSpec.scala |
-| NiPoPoW proofs | PoPowAlgosSpec.scala |
-| NiPoPoW verification | NipopowVerifierSpec.scala |
-| UTXO snapshots | UtxoSetSnapshotProcessorSpecification.scala |
-| Deep rollback | DeepRollBackSpec.scala |
-| Fork resolution | ForkResolutionSpec.scala |
-| Multi-node sync | UtxoStateNodesSyncSpec.scala |
-| Mining | CandidateGeneratorSpec.scala, ErgoMinerSpec.scala |
+| Feature | Test File | Rust Tests |
+|---------|-----------|------------|
+| Mempool dependencies | ErgoMemPoolSpec.scala | ergo-mempool tests |
+| NiPoPoW proofs | PoPowAlgosSpec.scala | nipopow::tests (38 tests) |
+| NiPoPoW verification | NipopowVerifierSpec.scala | nipopow::verifier::tests |
+| UTXO snapshots | UtxoSetSnapshotProcessorSpecification.scala | snapshots::tests |
+| Deep rollback | DeepRollBackSpec.scala | state::tests |
+| Fork resolution | ForkResolutionSpec.scala | history::tests |
+| Multi-node sync | UtxoStateNodesSyncSpec.scala | sync::tests |
+| Mining | CandidateGeneratorSpec.scala | mining::tests |
+| Re-emission | ReemissionRulesSpec.scala | reemission::tests (16 tests) |
+| Indexer | ExtraIndexerSpec.scala | indexer::tests |

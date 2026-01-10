@@ -42,6 +42,10 @@ pub enum ColumnFamily {
     BoxIndex,
     /// Numeric transaction index (global_index -> tx_id).
     TxNumericIndex,
+    /// Scan definitions (scan_id -> Scan).
+    Scans,
+    /// Scan boxes (scan_id:box_id -> ScanBox).
+    ScanBoxes,
     /// Default column family (required by RocksDB).
     Default,
 }
@@ -66,6 +70,8 @@ impl ColumnFamily {
             ColumnFamily::ExtraIndex => "extra_index",
             ColumnFamily::BoxIndex => "box_index",
             ColumnFamily::TxNumericIndex => "tx_numeric_index",
+            ColumnFamily::Scans => "scans",
+            ColumnFamily::ScanBoxes => "scan_boxes",
             ColumnFamily::Default => "default",
         }
     }
@@ -89,6 +95,8 @@ impl ColumnFamily {
             ColumnFamily::ExtraIndex,
             ColumnFamily::BoxIndex,
             ColumnFamily::TxNumericIndex,
+            ColumnFamily::Scans,
+            ColumnFamily::ScanBoxes,
             ColumnFamily::Default,
         ]
     }

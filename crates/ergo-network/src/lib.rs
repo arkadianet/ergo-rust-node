@@ -10,6 +10,7 @@
 
 mod codec;
 mod connection;
+pub mod discovery;
 mod error;
 mod handshake;
 mod message;
@@ -18,6 +19,7 @@ mod service;
 
 pub use codec::{MessageCodec, PeerAddress, PeerFeature};
 pub use connection::{Connection, ConnectionConfig};
+pub use discovery::{NetworkType, PeerDiscovery, MAINNET_DNS_SEEDS, TESTNET_DNS_SEEDS};
 pub use error::{NetworkError, NetworkResult};
 pub use handshake::{DeclaredAddress, HandshakeCodec, HandshakeData, PeerSpec};
 pub use message::{

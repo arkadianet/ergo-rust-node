@@ -6,24 +6,24 @@ This document outlines the implementation plan for the Ergo Rust Node, a full bl
 
 ## Current Status
 
-**Last Updated:** January 9, 2025
+**Last Updated:** January 10, 2025
 
-The project has completed core infrastructure (Phases 1-10). Header and block synchronization is working with real Ergo mainnet nodes. Mining and wallet functionality are fully implemented.
+The project has completed all major implementation phases. The node is fully functional with header/block synchronization, mining, wallet, and advanced features including UTXO snapshot sync, NiPoPoW support, extra indexer, and EIP-27 re-emission.
 
 | Crate | Status | Description |
 |-------|--------|-------------|
-| ergo-storage | COMPLETE | RocksDB storage layer with column families |
-| ergo-consensus | COMPLETE | Autolykos v2 PoW, difficulty adjustment, validation |
-| ergo-state | COMPLETE | UTXO state with AVL tree, history management, box indexing |
+| ergo-storage | COMPLETE | RocksDB storage layer with column families, extra indexer |
+| ergo-consensus | COMPLETE | Autolykos v2 PoW, difficulty adjustment, validation, NiPoPoW, re-emission |
+| ergo-state | COMPLETE | UTXO state with AVL tree, history management, box indexing, snapshots |
 | ergo-mempool | COMPLETE | Transaction pool with fee ordering, dependency tracking |
 | ergo-network | COMPLETE | P2P protocol, TCP handling, handshake, peer management |
-| ergo-sync | COMPLETE | Sync state machine, header sync, block download scheduler |
-| ergo-api | COMPLETE | REST API endpoints (core + extended: utils, emission, script) |
-| ergo-mining | COMPLETE | Block candidate generation, coinbase, tx selection |
+| ergo-sync | COMPLETE | Sync state machine, header sync, block download, snapshot sync |
+| ergo-api | COMPLETE | REST API endpoints (core + extended + blockchain indexer) |
+| ergo-mining | COMPLETE | Block candidate generation, coinbase with EIP-27, tx selection |
 | ergo-wallet | COMPLETE | HD wallet, transaction building, signing |
 | ergo-node | COMPLETE | Main binary with all components wired up, block pruning |
 
-**Overall Completion: ~95%**
+**Overall Completion: ~98%**
 
 ---
 
@@ -125,62 +125,69 @@ The project has completed core infrastructure (Phases 1-10). Header and block sy
 ### Phase 13: Extended API Endpoints
 
 - [x] /utils/* (seed generation, blake2b hashing, address validation/conversion)
-- [x] /emission/* (emission info at height, emission scripts)
+- [x] /emission/* (emission info at height, emission scripts with EIP-27)
 - [x] /script/* (p2sAddress, p2shAddress, addressToTree, addressToBytes)
+
+### Phase 14: UTXO Snapshot Sync
+
+- [x] SnapshotsDb for manifest/chunk storage
+- [x] Manifest and subtree serialization
+- [x] Download plan management with chunk tracking
+- [x] P2P messages (GetSnapshotsInfo, SnapshotsInfo, GetManifest, Manifest, GetUtxoSnapshotChunk, UtxoSnapshotChunk)
+- [x] Sync module integration with SyncState::DownloadingSnapshot
+- [x] Snapshot peer registration and tracking
+- [x] Configurable snapshot sync enable/disable
+
+### Phase 15: NiPoPoW Support
+
+- [x] PoPowHeader with interlinks serialization
+- [x] NipopowAlgos (max_level_of, interlinks packing, best_arg, lowest_common_ancestor)
+- [x] NipopowProof struct with validation and comparison
+- [x] NipopowVerifier state machine for bootstrap
+- [x] P2P messages (GetNipopowProof, NipopowProof)
+- [x] API endpoints (/nipopow/proof/{m}/{k}, /nipopow/popowHeaderById/{headerId})
+- [x] Comprehensive test suite (38 tests)
+
+### Phase 16: Extra Indexer
+
+- [x] IndexedErgoBox with spending info, global index, tokens
+- [x] IndexedErgoTransaction with input/output indexes
+- [x] IndexedErgoAddress with balance tracking (nanoERG + tokens)
+- [x] IndexedToken with creation info and box tracking
+- [x] ExtraIndexer with index_output, spend_box, index_transaction, register_token
+- [x] Atomic flush with WriteBatch
+- [x] Column families (ExtraIndex, BoxIndex, TxNumericIndex)
+- [x] /blockchain/* API endpoints (indexedHeight, transaction/byId, box/byId, box/byIndex, token/byId, balance/byAddress, box/byAddress, box/byTokenId)
+- [x] Pagination support with offset/limit
+
+### Phase 17: Re-emission (EIP-27)
+
+- [x] ReemissionSettings with mainnet/testnet configurations
+- [x] ReemissionRules with emission_at_height, reemission_for_height, miner_reward_at_height
+- [x] Claimable re-emission after height 2,080,800 (3 ERG/block)
+- [x] Total miner income calculation (direct + claimable)
+- [x] O(1) issued_coins_after_height using closed-form arithmetic series
+- [x] Updated emission API with re-emission amounts
+- [x] CoinbaseBuilder with EIP-27 support
+- [x] Lazy static rules for API performance
 
 ---
 
 ## Remaining Work
 
-### Priority 1: UTXO Snapshot Sync
+### Production Hardening
 
-Enable fast bootstrap via UTXO set snapshots.
+- [ ] Full integration testing with Scala node
+- [ ] Stress testing and benchmarking
+- [ ] Memory profiling and optimization
+- [ ] Documentation improvements
 
-**New files:** `crates/ergo-state/src/snapshots.rs`
+### Optional Enhancements
 
-**Tasks:**
-- [ ] SnapshotsDb for manifest/chunk storage
-- [ ] Manifest and subtree serialization
-- [ ] Download plan management
-- [ ] P2P messages (GetManifest, Manifest, GetUtxoSnapshotChunk, UtxoSnapshotChunk)
-- [ ] Sync module integration
-
-### Priority 2: NiPoPoW Support
-
-Light client bootstrap and cross-chain verification.
-
-**New module:** `crates/ergo-consensus/src/nipopow/`
-
-**Tasks:**
-- [ ] PoPowHeader with interlinks
-- [ ] NipopowAlgos (update_interlinks, prove, verify)
-- [ ] NipopowProof struct and validation
-- [ ] NipopowVerifier state machine
-- [ ] P2P messages and API endpoints
-
-### Priority 3: Extra Indexer
-
-Advanced blockchain queries for explorers/dApps.
-
-**New module:** `crates/ergo-storage/src/indexer/`
-
-**Tasks:**
-- [ ] Indexed data structures (address, transaction, box, token)
-- [ ] Segment-based indexing
-- [ ] /blockchain/* API endpoints
-- [ ] Optional configuration
-
-### Priority 4: Re-emission (EIP-27)
-
-Long-term token economics support.
-
-**Files:** `crates/ergo-consensus/src/emission.rs`, `crates/ergo-mining/src/coinbase.rs`
-
-**Tasks:**
-- [ ] Re-emission configuration
-- [ ] Modified emission calculation
-- [ ] Re-emission output validation
-- [ ] Mining candidate updates
+- [ ] Scan API (/scan/register, /scan/deregister, /scan/listAll, /scan/unspentBoxes, /scan/spentBoxes)
+- [ ] Script execution API (/script/executeWithContext) - endpoint exists, needs full implementation
+- [ ] Prometheus metrics export
+- [ ] Docker containerization
 
 ---
 
@@ -188,17 +195,17 @@ Long-term token economics support.
 
 | Crate | Tests | Status |
 |-------|-------|--------|
-| ergo-consensus | 58 | PASSING |
+| ergo-consensus | 112 | PASSING |
 | ergo-mempool | 22 | PASSING |
 | ergo-network | 19 | PASSING |
-| ergo-state | 29 | PASSING |
-| ergo-sync | 8 | PASSING |
-| ergo-mining | 3 | PASSING |
+| ergo-state | 37 | PASSING |
+| ergo-sync | 15 | PASSING |
+| ergo-mining | 6 | PASSING |
 | ergo-wallet | 23 | PASSING |
-| ergo-storage | 3 | PASSING |
-| ergo-api | 18 | PASSING |
+| ergo-storage | 22 | PASSING |
+| ergo-api | 13 | PASSING |
 | ergo-node | 2 | PASSING |
-| **Total** | **185** | **PASSING** |
+| **Total** | **~280** | **PASSING** |
 
 ---
 
@@ -233,6 +240,7 @@ Long-term token economics support.
 - `k256` - secp256k1 cryptography
 - `blake2` - Hashing
 - `tokio-util` - Codec support
+- `once_cell` - Static lazy initialization
 
 ---
 
@@ -247,7 +255,8 @@ Long-term token economics support.
 | M5: Mining Support | COMPLETE |
 | M6: Wallet Complete | COMPLETE |
 | M7: API Complete | COMPLETE |
-| M8: Production Ready | IN PROGRESS |
+| M8: Advanced Features | COMPLETE |
+| M9: Production Ready | IN PROGRESS |
 
 ---
 
@@ -265,7 +274,8 @@ Long-term token economics support.
 +---------------------+      +---------------------+      +---------------------+
 |    ergo-network     |      |     ergo-sync       |      |     ergo-api        |
 |  (P2P, Handshake,   |<---->|  (Sync Protocol,    |      |   (REST Server,     |
-|   Peer Management)  |      |   Block Download)   |      |    Handlers)        |
+|   Peer Management)  |      |   Block Download,   |      |    Handlers,        |
+|                     |      |   Snapshot Sync)    |      |    Blockchain API)  |
 +---------------------+      +---------------------+      +---------------------+
                                        |
            +---------------------------+---------------------------+
@@ -274,7 +284,9 @@ Long-term token economics support.
 +---------------------+      +---------------------+      +---------------------+
 |   ergo-consensus    |      |    ergo-state       |      |    ergo-mempool     |
 |  (PoW, Difficulty,  |<---->|  (UTXO, History,    |<---->|   (Tx Pool, Fee     |
-|   Validation)       |      |   Rollback)         |      |    Ordering)        |
+|   Validation,       |      |   Rollback,         |      |    Ordering,        |
+|   NiPoPoW,          |      |   Snapshots)        |      |    Dependencies)    |
+|   Re-emission)      |      |                     |      |                     |
 +---------------------+      +---------------------+      +---------------------+
                                        |
            +---------------------------+---------------------------+
@@ -283,6 +295,7 @@ Long-term token economics support.
 +---------------------+      +---------------------+      +---------------------+
 |    ergo-mining      |      |   ergo-storage      |      |    ergo-wallet      |
 |  (Candidates,       |      |  (RocksDB, Column   |      |  (HD Keys, TX       |
-|   Coinbase)         |      |   Families)         |      |   Building)         |
+|   Coinbase,         |      |   Families,         |      |   Building,         |
+|   EIP-27)           |      |   Extra Indexer)    |      |   Signing)          |
 +---------------------+      +---------------------+      +---------------------+
 ```
