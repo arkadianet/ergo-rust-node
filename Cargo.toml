@@ -11,6 +11,7 @@ members = [
     "crates/ergo-api",
     "crates/ergo-mining",
     "crates/ergo-wallet",
+    "crates/ergo-tests",
 ]
 
 [workspace.package]
@@ -97,6 +98,7 @@ derive_more = "0.99"
 # Testing
 proptest = "1"
 criterion = "0.5"
+tempfile = "3"
 
 [profile.release]
 lto = true

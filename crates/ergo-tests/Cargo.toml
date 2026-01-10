@@ -1,0 +1,29 @@
+[package]
+name = "ergo-tests"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Integration tests for the Ergo Rust Node"
+publish = false
+
+[dependencies]
+# Internal crates
+ergo-storage = { path = "../ergo-storage" }
+ergo-consensus = { path = "../ergo-consensus" }
+ergo-state = { path = "../ergo-state" }
+ergo-mempool = { path = "../ergo-mempool" }
+ergo-network = { path = "../ergo-network" }
+
+# Testing
+tempfile = "3"
+proptest = "1"
+
+# Async
+tokio = { version = "1", features = ["full", "test-util"] }
+
+# Utilities
+hex = "0.4"
+
+[lib]
+name = "ergo_tests"
+path = "src/lib.rs"
