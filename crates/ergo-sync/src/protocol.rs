@@ -1181,7 +1181,20 @@ impl SyncProtocol {
             error, "Block application failed"
         );
 
-        // Could re-request from different peer or mark as invalid
+        // Remove from completed set so it can be re-downloaded if needed
+        // This handles the case where validation fails due to transient issues
+        // (e.g., missing UTXO data that becomes available after other blocks are applied)
+        self.downloader.uncomplete(block_id);
+
+        // Also need to find the transactionsId that corresponds to this header_id
+        // and remove it from completed as well
+        let chain = self.header_chain.read();
+        for (tx_id, header_id) in &chain.tx_id_to_header_id {
+            if header_id == block_id {
+                self.downloader.uncomplete(tx_id);
+                break;
+            }
+        }
     }
 
     /// Handle request to download blocks for specific headers.

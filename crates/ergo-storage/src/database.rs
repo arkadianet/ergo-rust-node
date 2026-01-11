@@ -118,12 +118,13 @@ impl Database {
         opts.create_missing_column_families(true);
         opts.set_max_open_files(256);
         opts.set_keep_log_file_num(1);
-        opts.set_max_total_wal_size(128 * 1024 * 1024); // 128MB WAL
+        opts.set_max_total_wal_size(64 * 1024 * 1024); // 64MB WAL (reduced from 128MB)
 
         // Performance optimizations for sync workload
-        opts.set_write_buffer_size(64 * 1024 * 1024); // 64MB write buffer
-        opts.set_max_write_buffer_number(4); // Keep 4 write buffers
-        opts.set_min_write_buffer_number_to_merge(2); // Merge when 2 are full
+        // Balance between performance and memory usage
+        opts.set_write_buffer_size(16 * 1024 * 1024); // 16MB write buffer (reduced from 64MB)
+        opts.set_max_write_buffer_number(2); // Keep 2 write buffers (reduced from 4)
+        opts.set_min_write_buffer_number_to_merge(1); // Merge when 1 is full
         opts.set_level_zero_file_num_compaction_trigger(4);
         opts.set_max_background_jobs(4); // Background compaction threads
 
@@ -137,8 +138,9 @@ impl Database {
             .map(|cf| {
                 let mut cf_opts = Options::default();
                 cf_opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
-                // Larger block size for better compression and fewer seeks
-                cf_opts.set_write_buffer_size(32 * 1024 * 1024); // 32MB per CF
+                // Moderate buffer size per CF to control memory usage
+                // 19 CFs * 8MB = ~150MB total for CF write buffers
+                cf_opts.set_write_buffer_size(8 * 1024 * 1024); // 8MB per CF (reduced from 32MB)
                 ColumnFamilyDescriptor::new(cf.name(), cf_opts)
             })
             .collect();

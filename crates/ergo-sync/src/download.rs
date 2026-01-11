@@ -288,6 +288,11 @@ impl BlockDownloader {
     pub fn clear_completed(&self) {
         self.completed.write().clear();
     }
+
+    /// Remove a specific ID from the completed set (to allow re-downloading).
+    pub fn uncomplete(&self, id: &[u8]) {
+        self.completed.write().remove(id);
+    }
 }
 
 /// Download statistics.
