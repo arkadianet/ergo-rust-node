@@ -113,6 +113,42 @@ fn build_status_update(state: &AppState) -> String {
         })
         .collect();
 
+    // Get recent blocks (last 2) when synced
+    let recent_blocks: Vec<serde_json::Value> = if is_synced && utxo_height > 0 {
+        (0..2u32)
+            .filter_map(|offset| {
+                let height = utxo_height.saturating_sub(offset);
+                if height == 0 {
+                    return None;
+                }
+
+                let header = state.state.history.headers.get_by_height(height).ok()??;
+                let tx_ids: Vec<String> = state
+                    .state
+                    .history
+                    .blocks
+                    .get_transactions(&header.id)
+                    .ok()?
+                    .map(|txs| {
+                        txs.txs
+                            .iter()
+                            .map(|tx| hex::encode(tx.id().0.as_ref()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                Some(serde_json::json!({
+                    "id": hex::encode(header.id.0.as_ref()),
+                    "height": height,
+                    "timestamp": header.timestamp,
+                    "transactions": tx_ids
+                }))
+            })
+            .collect()
+    } else {
+        vec![]
+    };
+
     serde_json::json!({
         "type": "status",
         "fullHeight": utxo_height,
@@ -125,7 +161,8 @@ fn build_status_update(state: &AppState) -> String {
             "transactions": txs
         },
         "isMining": state.mining_enabled,
-        "nodeName": state.node_name
+        "nodeName": state.node_name,
+        "recentBlocks": recent_blocks
     })
     .to_string()
 }
