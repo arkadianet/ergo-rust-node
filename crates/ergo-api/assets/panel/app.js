@@ -15,10 +15,10 @@ const CONFIG = {
   TARGET_HEIGHT: 1500000, // Approximate mainnet height for progress calculation
   MAX_DISPLAYED_TXS: 100,
   PHYSICS: {
-    GRAVITY: 0.25,
-    FRICTION: 0.7,
-    BOUNCE: 0.4,
-    SETTLE_THRESHOLD: 0.3,
+    GRAVITY: 0.2,
+    FRICTION: 0.5,
+    BOUNCE: 0.3,
+    SETTLE_THRESHOLD: 0.15,
   },
 };
 
@@ -119,12 +119,12 @@ class MempoolVisualizer {
       radius: radius,
       width: radius * 2, // For collision compat
       height: radius * 2,
-      vx: (Math.random() - 0.5) * 2,
+      vx: (Math.random() - 0.5) * 4, // More horizontal spread
       vy: 0,
       color: this.feeToColor(feeRate),
       settled: false,
       removing: false,
-      confirming: false, // For downward animation into block
+      confirming: false,
       alpha: 1,
       fee: tx.fee,
       size: tx.size,
@@ -200,15 +200,12 @@ class MempoolVisualizer {
   updateTransaction(tx) {
     const { GRAVITY, FRICTION, BOUNCE, SETTLE_THRESHOLD } = CONFIG.PHYSICS;
 
-    // Handle confirmation animation (moving DOWN into block)
+    // Handle confirmation animation (fly away upward)
     if (tx.confirming) {
-      tx.vy = Math.min(tx.vy + 0.3, 8); // Accelerate down
+      tx.vy -= 0.3; // Accelerate upward
       tx.y += tx.vy;
-
-      // Fade out near bottom
-      if (tx.y > this.height - tx.radius * 4) {
-        tx.alpha = Math.max(0, tx.alpha - 0.06);
-      }
+      tx.x += tx.vx;
+      tx.alpha = Math.max(0, tx.alpha - 0.04); // Fade out as it flies
 
       // Remove when faded
       if (tx.alpha <= 0) {
@@ -235,17 +232,11 @@ class MempoolVisualizer {
     tx.y += tx.vy;
 
     // Floor collision
-    const floor = this.height - tx.height - 5;
-    if (tx.y > floor) {
-      tx.y = floor;
+    const floorY = this.height - tx.height - 5;
+    if (tx.y > floorY) {
+      tx.y = floorY;
       tx.vy *= -BOUNCE;
       tx.vx *= FRICTION;
-
-      // Check if settled
-      if (Math.abs(tx.vy) < SETTLE_THRESHOLD) {
-        tx.settled = true;
-        tx.vy = 0;
-      }
     }
 
     // Wall collisions
@@ -257,35 +248,88 @@ class MempoolVisualizer {
       tx.vx *= -FRICTION;
     }
 
-    // Simple collision with other settled transactions
+    // Elastic collision with other transactions (realistic ball physics)
     for (const other of this.transactions.values()) {
       if (other === tx || other.removing || other.confirming) continue;
-      if (!other.settled && other.y < tx.y) continue;
 
-      if (this.checkCollision(tx, other)) {
-        // Push up - use circle-based positioning
-        const txCenterY = tx.y + tx.radius;
-        const otherCenterY = other.y + other.radius;
-        if (txCenterY < otherCenterY && tx.vy > 0) {
-          tx.y = other.y - tx.radius * 2;
-          tx.vy *= -BOUNCE * 0.5;
+      // Calculate centers
+      const txCenterX = tx.x + tx.radius;
+      const txCenterY = tx.y + tx.radius;
+      const otherCenterX = other.x + other.radius;
+      const otherCenterY = other.y + other.radius;
 
-          if (Math.abs(tx.vy) < SETTLE_THRESHOLD) {
-            tx.settled = true;
-            tx.vy = 0;
-          }
+      // Distance between centers
+      const dx = txCenterX - otherCenterX;
+      const dy = txCenterY - otherCenterY;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      const minDist = tx.radius + other.radius;
+
+      if (dist < minDist && dist > 0) {
+        // Collision detected - apply elastic collision physics
+        const nx = dx / dist; // Normal vector (collision axis)
+        const ny = dy / dist;
+
+        // Separate overlapping circles (push apart equally)
+        const overlap = minDist - dist;
+        const separationX = (nx * overlap) / 2;
+        const separationY = (ny * overlap) / 2;
+        tx.x += separationX;
+        tx.y += separationY;
+        other.x -= separationX;
+        other.y -= separationY;
+
+        // Relative velocity
+        const dvx = tx.vx - other.vx;
+        const dvy = tx.vy - other.vy;
+
+        // Relative velocity along collision normal
+        const dvn = dvx * nx + dvy * ny;
+
+        // Only resolve if circles are approaching (not separating)
+        if (dvn < 0) {
+          // Mass proportional to radius squared (area)
+          const m1 = tx.radius * tx.radius;
+          const m2 = other.radius * other.radius;
+          const totalMass = m1 + m2;
+
+          // Elastic collision impulse (with restitution)
+          const restitution = 0.7; // Bounciness
+          const impulse = (-(1 + restitution) * dvn) / totalMass;
+
+          // Apply impulse to velocities
+          tx.vx += impulse * m2 * nx;
+          tx.vy += impulse * m2 * ny;
+          other.vx -= impulse * m1 * nx;
+          other.vy -= impulse * m1 * ny;
+
+          // Wake up both particles
+          tx.settled = false;
+          other.settled = false;
         }
       }
     }
+
+    // Check if should settle (on floor and slow enough)
+    const floor = this.height - tx.height - 5;
+    if (
+      tx.y >= floor - 1 &&
+      Math.abs(tx.vy) < SETTLE_THRESHOLD &&
+      Math.abs(tx.vx) < 0.3
+    ) {
+      tx.settled = true;
+      tx.vy = 0;
+      tx.vx = 0;
+    }
   }
 
-  // Animate transaction moving DOWN (into a confirmed block)
+  // Animate transaction flying away (confirmed into a block)
   confirmTransaction(txId) {
     const tx = this.transactions.get(txId);
     if (tx && !tx.confirming && !tx.removing) {
       tx.confirming = true;
       tx.settled = false;
-      tx.vy = 4; // Initial downward velocity
+      tx.vy = -6 - Math.random() * 4; // Upward velocity (-6 to -10)
+      tx.vx = (Math.random() - 0.5) * 6; // Random horizontal spread
     }
   }
 

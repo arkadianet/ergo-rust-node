@@ -363,9 +363,18 @@ body {
 
 /* Mempool Section */
 .mempool-section {
-    flex: 1;
     display: flex;
     flex-direction: column;
+    padding-bottom: 1rem;
+}
+
+.mempool-section .canvas-container {
+    height: 220px;
+    /* Extend canvas to card edges by using negative margins to counteract card padding */
+    margin-left: -1.5rem;
+    margin-right: -1.5rem;
+    margin-bottom: -1rem;
+    border-radius: 0 0 var(--radius) var(--radius);
 }
 
 .section-header {
@@ -411,10 +420,7 @@ body {
 }
 
 .canvas-container {
-    flex: 1;
     position: relative;
-    min-height: 200px;
-    max-height: 220px;
     background: var(--bg-dark);
     border-radius: var(--radius-sm);
     overflow: hidden;

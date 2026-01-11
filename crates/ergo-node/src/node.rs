@@ -964,6 +964,18 @@ impl Node {
                                         let first_h = validated_blocks[0].0.height();
                                         let last_h = validated_blocks[batch_count - 1].0.height();
 
+                                        // Collect tx IDs and spent inputs for mempool cleanup BEFORE consuming blocks
+                                        let mut confirmed_tx_ids: Vec<Vec<u8>> = Vec::new();
+                                        let mut spent_inputs: Vec<Vec<u8>> = Vec::new();
+                                        for (fb, sc, _) in &validated_blocks {
+                                            for tx in &fb.transactions.txs {
+                                                confirmed_tx_ids.push(tx.id().as_ref().to_vec());
+                                            }
+                                            for box_id in &sc.spent {
+                                                spent_inputs.push(box_id.as_ref().to_vec());
+                                            }
+                                        }
+
                                         // Convert to the format expected by apply_blocks_batched
                                         let blocks_for_batch: Vec<_> = validated_blocks
                                             .drain(..)
@@ -978,6 +990,11 @@ impl Node {
                                                 info!(first_h, last_h, batch_count, "Batch of blocks applied successfully");
                                                 // Clear batch-created boxes since they're now in the database
                                                 batch_created_boxes.clear();
+                                                // Remove confirmed transactions from mempool
+                                                let removed = mempool.remove_confirmed(&confirmed_tx_ids, &spent_inputs);
+                                                if removed > 0 {
+                                                    debug!(removed, "Removed confirmed transactions from mempool");
+                                                }
                                                 // Notify sync protocol for each block
                                                 for (i, bid) in block_ids.into_iter().enumerate() {
                                                     let h = first_h + i as u32;
@@ -1009,6 +1026,18 @@ impl Node {
                                     let first_h = validated_blocks[0].0.height();
                                     let last_h = validated_blocks[batch_count - 1].0.height();
 
+                                    // Collect tx IDs and spent inputs for mempool cleanup BEFORE consuming blocks
+                                    let mut confirmed_tx_ids: Vec<Vec<u8>> = Vec::new();
+                                    let mut spent_inputs: Vec<Vec<u8>> = Vec::new();
+                                    for (fb, sc, _) in &validated_blocks {
+                                        for tx in &fb.transactions.txs {
+                                            confirmed_tx_ids.push(tx.id().as_ref().to_vec());
+                                        }
+                                        for box_id in &sc.spent {
+                                            spent_inputs.push(box_id.as_ref().to_vec());
+                                        }
+                                    }
+
                                     let blocks_for_batch: Vec<_> = validated_blocks
                                         .drain(..)
                                         .map(|(fb, sc, bid)| ((fb, sc), bid))
@@ -1020,6 +1049,11 @@ impl Node {
                                     match state_for_router.apply_blocks_batched(blocks) {
                                         Ok(_) => {
                                             info!(first_h, last_h, batch_count, "Final batch of blocks applied successfully");
+                                            // Remove confirmed transactions from mempool
+                                            let removed = mempool.remove_confirmed(&confirmed_tx_ids, &spent_inputs);
+                                            if removed > 0 {
+                                                debug!(removed, "Removed confirmed transactions from mempool");
+                                            }
                                             for (i, bid) in block_ids.into_iter().enumerate() {
                                                 let h = first_h + i as u32;
                                                 let _ = sync_event_tx_clone.send(SyncEvent::BlockApplied {

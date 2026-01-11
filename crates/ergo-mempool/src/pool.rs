@@ -555,23 +555,40 @@ impl Mempool {
     }
 
     /// Remove transactions that conflict with a new block.
-    pub fn remove_confirmed(&self, tx_ids: &[Vec<u8>], spent_inputs: &[Vec<u8>]) {
+    /// This removes:
+    /// 1. Transactions that were confirmed in the block
+    /// 2. Transactions whose inputs were spent by confirmed transactions (now invalid)
+    /// Returns the number of transactions removed.
+    pub fn remove_confirmed(&self, tx_ids: &[Vec<u8>], spent_inputs: &[Vec<u8>]) -> usize {
+        let mut removed = 0;
+
         // Remove confirmed transactions
         for tx_id in tx_ids {
-            let _ = self.remove(tx_id);
+            if self.remove(tx_id).is_ok() {
+                removed += 1;
+            }
         }
 
-        // Remove transactions that spend now-confirmed inputs
+        // Remove transactions whose inputs were spent by confirmed transactions
+        // This handles the case where a mempool tx becomes invalid because its
+        // inputs were consumed by a different confirmed transaction
         let mut to_remove = Vec::new();
         for input in spent_inputs {
             if let Some(tx_id) = self.get_spending_tx(input) {
-                to_remove.push(tx_id);
+                // Only remove if not already removed (wasn't a confirmed tx itself)
+                if !tx_ids.contains(&tx_id) {
+                    to_remove.push(tx_id);
+                }
             }
         }
 
         for tx_id in to_remove {
-            let _ = self.remove(&tx_id);
+            if self.remove(&tx_id).is_ok() {
+                removed += 1;
+            }
         }
+
+        removed
     }
 
     /// Remove expired transactions.
