@@ -715,50 +715,88 @@ impl UtxoState {
         change: &StateChange,
         new_height: u32,
     ) -> StateResult<()> {
+        // Delegate to the version with cross-block context, using an empty context
+        self.add_change_to_batch_with_context(
+            batch,
+            change,
+            new_height,
+            &std::collections::HashMap::new(),
+        )
+    }
+
+    /// Add a state change to an external batch with cross-block context.
+    /// The `batch_created_boxes` parameter contains boxes created in previous blocks
+    /// of the same batch that haven't been committed to the database yet.
+    /// This handles the case where a box is created in block N and spent in block N+1
+    /// within the same batch write.
+    #[instrument(skip(self, batch, change, batch_created_boxes), fields(created = change.created.len(), spent = change.spent.len()))]
+    pub fn add_change_to_batch_with_context(
+        &self,
+        batch: &mut WriteBatch,
+        change: &StateChange,
+        new_height: u32,
+        batch_created_boxes: &std::collections::HashMap<Vec<u8>, BoxEntry>,
+    ) -> StateResult<()> {
+        use std::collections::HashMap;
+
         // Check if we should skip index maintenance (sync mode)
         let skip_indexes = self.is_sync_mode();
 
         // Create undo data to enable rollback
         let mut undo = UndoData::new(new_height);
 
+        // Build a map of boxes created in this block for within-block lookups
+        // This handles the case where a box is created and spent in the same block
+        let created_in_block: HashMap<Vec<u8>, &BoxEntry> = change
+            .created
+            .iter()
+            .map(|entry| (entry.box_id_bytes(), entry))
+            .collect();
+
         // Remove spent boxes (but save them for undo)
         for box_id in &change.spent {
-            // Get the box data before removing it (for undo and index removal)
-            if let Some(entry) = self.get_box(box_id)? {
-                // Only update indexes if not in sync mode
-                if !skip_indexes {
-                    // Remove from ErgoTree index
-                    let ergotree_hash = Self::hash_ergotree(&entry.ergo_box);
-                    self.remove_from_index(
-                        batch,
-                        columns::ERGOTREE_INDEX,
-                        &ergotree_hash,
-                        box_id.as_ref(),
-                    )?;
+            let box_id_bytes = box_id.as_ref().to_vec();
 
-                    // Remove from Token index for each token in the box
-                    for token in entry
-                        .ergo_box
-                        .tokens
-                        .as_ref()
-                        .map(|t| t.as_slice())
-                        .unwrap_or(&[])
-                    {
-                        let token_id = token.token_id.as_ref();
-                        self.remove_from_index(
-                            batch,
-                            columns::TOKEN_INDEX,
-                            token_id,
-                            box_id.as_ref(),
-                        )?;
-                    }
-                }
-
-                undo.spent_boxes.push(entry);
+            // First check if the box was created in this same block
+            let entry = if let Some(&created_entry) = created_in_block.get(&box_id_bytes) {
+                // Box was created and spent in the same block - use the created entry
+                created_entry.clone()
+            } else if let Some(batch_entry) = batch_created_boxes.get(&box_id_bytes) {
+                // Box was created in a previous block within this batch
+                batch_entry.clone()
+            } else if let Some(db_entry) = self.get_box(box_id)? {
+                // Box exists in the UTXO database
+                db_entry
             } else {
                 return Err(StateError::BoxNotFound(hex::encode(box_id.as_ref())));
+            };
+
+            // Only update indexes if not in sync mode
+            if !skip_indexes {
+                // Remove from ErgoTree index
+                let ergotree_hash = Self::hash_ergotree(&entry.ergo_box);
+                self.remove_from_index(
+                    batch,
+                    columns::ERGOTREE_INDEX,
+                    &ergotree_hash,
+                    box_id.as_ref(),
+                )?;
+
+                // Remove from Token index for each token in the box
+                for token in entry
+                    .ergo_box
+                    .tokens
+                    .as_ref()
+                    .map(|t| t.as_slice())
+                    .unwrap_or(&[])
+                {
+                    let token_id = token.token_id.as_ref();
+                    self.remove_from_index(batch, columns::TOKEN_INDEX, token_id, box_id.as_ref())?;
+                }
             }
-            batch.delete(columns::UTXO, box_id.as_ref().to_vec());
+
+            undo.spent_boxes.push(entry);
+            batch.delete(columns::UTXO, box_id_bytes);
         }
 
         // Add created boxes (and record their IDs for undo)

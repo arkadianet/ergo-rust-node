@@ -3,6 +3,7 @@
 //! This module provides full transaction validation including:
 //! - Input existence verification against UTXO state
 //! - ErgoScript execution for spending conditions
+//! - Storage rent spending validation
 //! - Token conservation rules
 //! - Fee validation
 //! - Transaction cost calculation and limits
@@ -13,13 +14,25 @@ use ergo_chain_types::{Header, PreHeader};
 use ergo_lib::chain::transaction::Transaction;
 use ergo_lib::ergotree_ir::chain::context::{Context, ContextExtensionProvider, TxIoVec};
 use ergo_lib::ergotree_ir::chain::context_extension::ContextExtension;
-use ergo_lib::ergotree_ir::chain::ergo_box::ErgoBox;
+use ergo_lib::ergotree_ir::chain::ergo_box::{ErgoBox, RegisterId};
 use ergo_lib::ergotree_ir::ergo_tree::ErgoTreeVersion;
+use ergo_lib::ergotree_ir::mir::constant::TryExtractInto;
 use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
 use ergotree_interpreter::sigma_protocol::prover::ProofBytes;
 use ergotree_interpreter::sigma_protocol::verifier::Verifier;
 use std::cell::Cell;
 use tracing::{debug, instrument, warn};
+
+/// The minimum time (in blocks) before a box can be spent via storage rent mechanism.
+/// This is approximately 4 years at 2 minutes per block.
+pub const STORAGE_PERIOD: u32 = 1051200;
+
+/// The context extension key that stores the output index for storage rent spending.
+pub const STORAGE_EXTENSION_INDEX: u8 = 127;
+
+/// Default storage fee factor (nanoERG per byte).
+/// This is typically 1250000 nanoERG per byte (0.00125 ERG per byte).
+pub const DEFAULT_STORAGE_FEE_FACTOR: u64 = 1250000;
 
 /// Provides context extensions for transaction inputs during verification.
 struct TxContextExtensionProvider<'a> {
@@ -30,6 +43,162 @@ impl<'a> ContextExtensionProvider for TxContextExtensionProvider<'a> {
     fn context_extension(&self, input_index: usize) -> Option<&ContextExtension> {
         self.extensions.get(input_index)
     }
+}
+
+/// Check if a box can be spent via storage rent mechanism.
+///
+/// Storage rent allows spending boxes older than ~4 years without a cryptographic proof,
+/// provided certain conditions are met:
+/// 1. The box must be at least STORAGE_PERIOD blocks old
+/// 2. The context extension must contain the output index at key 127
+/// 3. The output must preserve the box's registers (except value and creation info)
+/// 4. The output must contain at least (input_value - storage_fee) ERG
+///
+/// Returns true if the box can be spent via storage rent, false otherwise.
+fn check_storage_rent_conditions(
+    input_box: &ErgoBox,
+    extension: &ContextExtension,
+    outputs: &[ErgoBox],
+    current_height: u32,
+) -> bool {
+    let box_id = hex::encode(input_box.box_id().as_ref());
+
+    // Check if the box is old enough (at least STORAGE_PERIOD blocks)
+    let box_age = current_height.saturating_sub(input_box.creation_height);
+    if box_age < STORAGE_PERIOD {
+        debug!(
+            box_id = %box_id,
+            box_age,
+            required_age = STORAGE_PERIOD,
+            "Storage rent check failed: box not old enough"
+        );
+        return false;
+    }
+
+    // Get the output index from context extension key 127
+    // Ergo uses signed short (i16) for this value
+    let output_idx: i16 = match extension.values.get(&STORAGE_EXTENSION_INDEX) {
+        Some(constant) => match constant.v.clone().try_extract_into::<i16>() {
+            Ok(idx) => idx,
+            Err(e) => {
+                debug!(
+                    box_id = %box_id,
+                    error = %e,
+                    "Storage rent check failed: could not extract output index from extension"
+                );
+                return false;
+            }
+        },
+        None => {
+            debug!(
+                box_id = %box_id,
+                "Storage rent check failed: no output index in context extension"
+            );
+            return false;
+        }
+    };
+
+    // Validate output index is non-negative before casting to usize
+    if output_idx < 0 {
+        debug!(
+            box_id = %box_id,
+            output_idx,
+            "Storage rent check failed: negative output index"
+        );
+        return false;
+    }
+
+    // Get the corresponding output
+    let output = match outputs.get(output_idx as usize) {
+        Some(out) => out,
+        None => {
+            debug!(
+                box_id = %box_id,
+                output_idx,
+                outputs_len = outputs.len(),
+                "Storage rent check failed: output index out of bounds"
+            );
+            return false;
+        }
+    };
+
+    // Calculate the storage fee
+    let box_bytes = match input_box.sigma_serialize_bytes() {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            debug!(
+                box_id = %box_id,
+                error = %e,
+                "Storage rent check failed: could not serialize box"
+            );
+            return false;
+        }
+    };
+    let storage_fee = (box_bytes.len() as u64) * DEFAULT_STORAGE_FEE_FACTOR;
+
+    let input_value = u64::from(input_box.value);
+
+    // If the box's value is less than or equal to the storage fee, it can be spent without restrictions
+    if input_value <= storage_fee {
+        debug!(
+            box_id = %box_id,
+            input_value,
+            storage_fee,
+            "Storage rent: box value <= fee, can be fully consumed"
+        );
+        return true;
+    }
+
+    // Check output creation height matches current height
+    if output.creation_height != current_height {
+        debug!(
+            box_id = %box_id,
+            output_creation_height = output.creation_height,
+            current_height,
+            "Storage rent check failed: output creation height mismatch"
+        );
+        return false;
+    }
+
+    // Check output value is at least (input_value - storage_fee)
+    let output_value = u64::from(output.value);
+    let min_output_value = input_value.saturating_sub(storage_fee);
+    if output_value < min_output_value {
+        debug!(
+            box_id = %box_id,
+            output_value,
+            min_output_value,
+            input_value,
+            storage_fee,
+            "Storage rent check failed: output value too low"
+        );
+        return false;
+    }
+
+    // Check that all registers except R0 (value) and R3 (creation info) are preserved
+    // R0 contains the box value, R3 contains creation info (height, tx_id, output_index)
+    for reg_id in 0..=9u8 {
+        let reg = match RegisterId::try_from(reg_id) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+
+        // Skip R0 (value) and R3 (creation info) - these can change
+        if reg == RegisterId::R0 || reg == RegisterId::R3 {
+            continue;
+        }
+
+        if input_box.get_register(reg) != output.get_register(reg) {
+            debug!(
+                box_id = %box_id,
+                register = ?reg,
+                "Storage rent check failed: register not preserved"
+            );
+            return false;
+        }
+    }
+
+    true
 }
 
 /// Transaction verification result.
@@ -144,6 +313,7 @@ impl TxVerifier {
         for (idx, (input, input_box)) in tx.inputs.iter().zip(input_boxes.iter()).enumerate() {
             // Get the spending proof from the input
             let proof_bytes: Vec<u8> = input.spending_proof.proof.clone().into();
+            let proof_len = proof_bytes.len();
             let proof = if proof_bytes.is_empty() {
                 ProofBytes::Empty
             } else {
@@ -170,13 +340,47 @@ impl TxVerifier {
             // Get the ErgoTree from the input box
             let ergo_tree = &input_box.ergo_tree;
 
-            // Compute message to sign (transaction bytes without proofs)
-            // In Ergo, the message is the transaction ID
-            let tx_id = tx.id();
-            let message: &[u8] = tx_id.as_ref();
+            // Compute message to sign (serialized transaction with empty proofs)
+            // This is what the prover signed - NOT the transaction ID hash
+            let message = match tx.bytes_to_sign() {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    return TxVerificationResult {
+                        valid: false,
+                        script_cost: 0,
+                        total_cost: base_cost,
+                        error: Some(format!("Failed to get bytes to sign: {}", e)),
+                    };
+                }
+            };
 
-            // Verify the spending proof
-            match self.verify(ergo_tree, &ctx, proof, message) {
+            // Log verification details for debugging
+            debug!(
+                input_idx = idx,
+                box_id = %hex::encode(input_box.box_id().as_ref()),
+                tx_id = %hex::encode(tx.id().as_ref()),
+                message_len = message.len(),
+                proof_len,
+                height = self.height,
+                "Verifying input"
+            );
+
+            // First, check if this is a storage rent spend (empty proof + box old enough)
+            if matches!(proof, ProofBytes::Empty) {
+                if check_storage_rent_conditions(input_box, extension, &outputs, self.height) {
+                    debug!(
+                        input_idx = idx,
+                        box_id = %hex::encode(input_box.box_id().as_ref()),
+                        box_age = self.height.saturating_sub(input_box.creation_height),
+                        "Input spent via storage rent"
+                    );
+                    // Storage rent spend is valid, no script cost
+                    continue;
+                }
+            }
+
+            // Verify the spending proof via ErgoScript
+            match self.verify(ergo_tree, &ctx, proof, &message) {
                 Ok(result) => {
                     script_cost += result.cost;
 
@@ -196,16 +400,27 @@ impl TxVerifier {
                     }
 
                     if !result.result {
-                        debug!(
+                        // Log diagnostic information from the reduction
+                        let diag_msg = if let Some(ref expr_str) = result.diag.pretty_printed_expr {
+                            format!("Script reduced to false. Expr: {}", expr_str)
+                        } else {
+                            "Script proof verification failed (signature mismatch)".to_string()
+                        };
+                        warn!(
                             input_idx = idx,
                             box_id = %hex::encode(input_box.box_id().as_ref()),
+                            height = self.height,
+                            diag = %diag_msg,
                             "Script verification failed"
                         );
                         return TxVerificationResult {
                             valid: false,
                             script_cost,
                             total_cost: base_cost.saturating_add(script_cost),
-                            error: Some(format!("Script verification failed for input {}", idx)),
+                            error: Some(format!(
+                                "Script verification failed for input {}: {}",
+                                idx, diag_msg
+                            )),
                         };
                     }
                 }

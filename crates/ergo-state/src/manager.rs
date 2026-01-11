@@ -272,6 +272,16 @@ impl StateManager {
                 .unwrap_or_else(|| num_bigint::BigUint::from(0u32))
         };
 
+        // Track boxes created across all blocks in this batch.
+        // This allows spending a box created in block N within block N+1 of the same batch,
+        // before the batch is committed to the database.
+        //
+        // NOTE: A similar tracking mechanism exists in Node::run() (see crates/ergo-node/src/node.rs)
+        // for the validation phase. Both are necessary: that one for validation lookups during
+        // script verification, this one for UTXO state updates during batch application.
+        let mut batch_created_boxes: std::collections::HashMap<Vec<u8>, crate::utxo::BoxEntry> =
+            std::collections::HashMap::new();
+
         // Add all blocks to the batch
         let mut final_block_id = blocks[0].0.id();
         for (block, state_change) in &blocks {
@@ -283,9 +293,25 @@ impl StateManager {
                 self.history
                     .add_block_to_batch(&mut batch, block, &cumulative_difficulty)?;
 
-            // Add UTXO changes to batch
-            self.utxo
-                .add_change_to_batch(&mut batch, state_change, height)?;
+            // Add UTXO changes to batch with cross-block context
+            self.utxo.add_change_to_batch_with_context(
+                &mut batch,
+                state_change,
+                height,
+                &batch_created_boxes,
+            )?;
+
+            // Add boxes created in this block to the cross-block context
+            // (so they can be found if spent in subsequent blocks of this batch)
+            for entry in &state_change.created {
+                batch_created_boxes.insert(entry.box_id_bytes(), entry.clone());
+            }
+
+            // Remove spent boxes from the cross-block context
+            // (they've been deleted in the batch and shouldn't be found again)
+            for box_id in &state_change.spent {
+                batch_created_boxes.remove(box_id.as_ref());
+            }
         }
 
         // Add final metadata updates

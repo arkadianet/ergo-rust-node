@@ -79,15 +79,10 @@ impl Checkpoint {
     /// Mainnet checkpoint (updated January 2026).
     /// Below this height, full transaction validation is skipped for faster initial sync.
     /// Only state root verification is performed to ensure correctness.
-    ///
-    /// NOTE: Script verification is currently failing on some mainnet blocks.
-    /// Until this is fixed, the checkpoint is set high to allow syncing.
-    /// TODO: Fix script verification and lower checkpoint to a known good block.
     pub fn mainnet() -> Self {
         Self {
-            // Set very high to bypass script verification issues during initial sync
-            // TODO: Lower this once script verification is fixed
-            height: u32::MAX,
+            // Set to height just before the failing block so we can debug script verification
+            height: 1690000,
             block_id: "".to_string(), // Block ID verification not yet implemented
         }
     }

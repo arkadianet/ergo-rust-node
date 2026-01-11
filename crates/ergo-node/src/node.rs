@@ -768,6 +768,15 @@ impl Node {
                                 let mut validated_blocks: Vec<(ergo_consensus::FullBlock, StateChange, Vec<u8>)> = Vec::new();
                                 let mut validation_failed = false;
 
+                                // Track boxes created by previously validated blocks in this batch.
+                                // This allows blocks later in the batch to reference outputs from earlier blocks
+                                // during validation (before they're committed to the database).
+                                //
+                                // NOTE: A similar tracking mechanism exists in StateManager::apply_blocks_batched()
+                                // (see crates/ergo-state/src/manager.rs) for the UTXO batch write phase.
+                                // Both are necessary: this one for validation lookups, that one for UTXO state updates.
+                                let mut batch_created_boxes: std::collections::HashMap<Vec<u8>, ErgoBox> = std::collections::HashMap::new();
+
                                 for (bid, bdata) in blocks_to_process {
                                     if validation_failed {
                                         // Re-buffer blocks after a failure
@@ -838,17 +847,22 @@ impl Node {
                                     let extension = Extension::empty(hdr_id.clone());
                                     let full_block = FullBlock::new(hdr.clone(), block_txs, extension, None);
 
-                                    // Get last 10 headers for ErgoScript context
+                                    // Get last 10 headers for ErgoScript context (in descending order - newest/parent first)
+                                    // headers[0] = parent block (height - 1)
+                                    // headers[1] = grandparent block (height - 2)
+                                    // etc.
                                     let last_headers: [Header; 10] = {
                                         let mut headers = Vec::with_capacity(10);
-                                        let start_height = if height > 10 { height - 10 } else { 1 };
-                                        for h in start_height..height {
+                                        // Collect headers from height-1 down to height-10 (descending order)
+                                        let end_height = if height > 10 { height - 10 } else { 1 };
+                                        for h in (end_height..height).rev() {
                                             if let Ok(Some(hdr)) = state_for_router.history.headers.get_by_height(h) {
                                                 headers.push(hdr);
                                             }
                                         }
+                                        // Pad with genesis headers at the end if we don't have 10
                                         while headers.len() < 10 {
-                                            headers.insert(0, genesis_parent_header());
+                                            headers.push(genesis_parent_header());
                                         }
                                         headers.try_into().unwrap_or_else(|_| std::array::from_fn(|_| genesis_parent_header()))
                                     };
@@ -856,7 +870,14 @@ impl Node {
                                     // Validate block
                                     let validator = FullBlockValidator::new();
                                     let utxo_state = &state_for_router.utxo;
+                                    // Look up boxes - first check boxes created by previous blocks in this batch,
+                                    // then fall back to the UTXO database
                                     let utxo_lookup = |box_id: &[u8]| -> Option<ErgoBox> {
+                                        // First check boxes created by previous blocks in this batch
+                                        if let Some(ergo_box) = batch_created_boxes.get(box_id) {
+                                            return Some(ergo_box.clone());
+                                        }
+                                        // Fall back to UTXO database
                                         utxo_state.get_box_by_bytes(box_id).ok().flatten().map(|entry| entry.ergo_box)
                                     };
 
@@ -904,6 +925,16 @@ impl Node {
                                         }).collect(),
                                     };
 
+                                    // Add created boxes to batch map for subsequent block validations
+                                    // Also remove spent boxes from the batch map
+                                    for created in &validated_change.created {
+                                        let box_id = created.ergo_box.box_id().as_ref().to_vec();
+                                        batch_created_boxes.insert(box_id, created.ergo_box.clone());
+                                    }
+                                    for spent in &validated_change.spent {
+                                        batch_created_boxes.remove(&spent.box_id);
+                                    }
+
                                     debug!(
                                         height,
                                         total_cost = validation_result.total_cost,
@@ -932,6 +963,8 @@ impl Node {
                                         match state_for_router.apply_blocks_batched(blocks) {
                                             Ok(_) => {
                                                 info!(first_h, last_h, batch_count, "Batch of blocks applied successfully");
+                                                // Clear batch-created boxes since they're now in the database
+                                                batch_created_boxes.clear();
                                                 // Notify sync protocol for each block
                                                 for (i, bid) in block_ids.into_iter().enumerate() {
                                                     let h = first_h + i as u32;
@@ -943,6 +976,8 @@ impl Node {
                                             }
                                             Err(e) => {
                                                 warn!(first_h, last_h, error = %e, "Failed to apply block batch");
+                                                // Clear batch-created boxes on failure too
+                                                batch_created_boxes.clear();
                                                 for bid in block_ids {
                                                     let _ = sync_event_tx_clone.send(SyncEvent::BlockFailed {
                                                         block_id: bid,
