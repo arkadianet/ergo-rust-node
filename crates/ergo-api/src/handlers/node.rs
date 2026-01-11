@@ -3,14 +3,16 @@
 use crate::{ApiError, ApiResult, AppState};
 use axum::{extract::State, http::HeaderMap, Json};
 use serde::Serialize;
+use utoipa::ToSchema;
 
 /// Shutdown response.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ShutdownResponse {
     /// Whether the shutdown was initiated successfully.
     pub success: bool,
     /// Message describing the shutdown status.
+    #[schema(example = "Shutdown initiated")]
     pub message: String,
 }
 
@@ -20,10 +22,24 @@ fn extract_api_key(headers: &HeaderMap) -> Option<&str> {
 }
 
 /// POST /node/shutdown
-/// Initiate a graceful node shutdown.
 ///
-/// This endpoint ALWAYS requires API key authentication for security.
-/// The node will complete in-progress operations before shutting down.
+/// Initiate a graceful node shutdown. This endpoint ALWAYS requires API key
+/// authentication for security. The node will complete in-progress operations
+/// before shutting down.
+#[utoipa::path(
+    post,
+    path = "/node/shutdown",
+    tag = "node",
+    responses(
+        (status = 200, description = "Shutdown initiated successfully", body = ShutdownResponse),
+        (status = 400, description = "API key not configured", body = crate::error::ErrorResponse),
+        (status = 401, description = "Unauthorized - invalid or missing API key", body = crate::error::ErrorResponse),
+        (status = 501, description = "Shutdown signal not configured", body = crate::error::ErrorResponse)
+    ),
+    params(
+        ("api_key" = String, Header, description = "API key for authentication")
+    )
+)]
 pub async fn shutdown(
     State(state): State<AppState>,
     headers: HeaderMap,

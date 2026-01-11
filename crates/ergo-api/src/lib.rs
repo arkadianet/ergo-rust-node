@@ -13,10 +13,12 @@
 
 mod error;
 mod handlers;
+mod openapi;
 mod routes;
 mod state;
 
 pub use error::{ApiError, ApiResult};
+pub use openapi::ApiDoc;
 pub use routes::create_router;
 pub use state::AppState;
 

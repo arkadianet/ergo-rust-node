@@ -13,14 +13,17 @@ use axum::{
 };
 use ergo_storage::IndexedErgoBox;
 use serde::{Deserialize, Serialize};
+use utoipa::{IntoParams, ToSchema};
 
 use crate::AppState;
 
-/// Pagination parameters.
-#[derive(Debug, Deserialize)]
-pub struct PaginationParams {
+/// Pagination parameters for blockchain queries.
+#[derive(Debug, Deserialize, IntoParams)]
+pub struct BlockchainPagination {
+    /// Offset for pagination.
     #[serde(default)]
     pub offset: usize,
+    /// Limit (default: 5).
     #[serde(default = "default_limit")]
     pub limit: usize,
 }
@@ -30,102 +33,179 @@ fn default_limit() -> usize {
 }
 
 /// Sort direction.
-#[derive(Debug, Deserialize, Default, Clone, Copy)]
+#[derive(Debug, Deserialize, Default, Clone, Copy, ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum SortDirection {
+    /// Ascending order.
     Asc,
+    /// Descending order.
     #[default]
     Desc,
 }
 
 /// Indexed height response.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct IndexedHeightResponse {
+    /// Current indexed height.
+    #[schema(example = 1000000)]
     pub indexed_height: u32,
+    /// Full blockchain height.
+    #[schema(example = 1000100)]
     pub full_height: u32,
 }
 
-/// Transaction response.
-#[derive(Debug, Serialize)]
+/// Indexed transaction response.
+#[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct TransactionResponse {
+pub struct IndexedTransactionResponse {
+    /// Transaction ID (hex).
+    #[schema(example = "0000000000000000000000000000000000000000000000000000000000000000")]
     pub id: String,
+    /// Transaction index within block.
+    #[schema(example = 0)]
     pub tx_index: u16,
+    /// Block height.
+    #[schema(example = 1000000)]
     pub height: u32,
+    /// Transaction size in bytes.
+    #[schema(example = 300)]
     pub size: u32,
+    /// Global transaction index.
+    #[schema(example = 5000000)]
     pub global_index: u64,
+    /// Input box indexes.
     pub inputs: Vec<u64>,
+    /// Output box indexes.
     pub outputs: Vec<u64>,
+    /// Data input box IDs.
     pub data_inputs: Vec<String>,
 }
 
-/// Box response.
-#[derive(Debug, Serialize)]
+/// Indexed box response.
+#[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct BoxResponse {
+pub struct IndexedBoxResponse {
+    /// Box ID (hex).
+    #[schema(example = "0000000000000000000000000000000000000000000000000000000000000000")]
     pub box_id: String,
+    /// Block height where box was created.
+    #[schema(example = 1000000)]
     pub inclusion_height: u32,
+    /// Global box index.
+    #[schema(example = 10000000)]
     pub global_index: u64,
+    /// Box value in nanoERG.
+    #[schema(example = 1000000000)]
     pub value: u64,
+    /// ErgoTree hash (hex).
+    #[schema(example = "0000000000000000000000000000000000000000000000000000000000000000")]
     pub ergo_tree_hash: String,
+    /// Whether box is spent.
     pub spent: bool,
+    /// Spending transaction ID (if spent).
     pub spending_tx_id: Option<String>,
+    /// Spending height (if spent).
     pub spending_height: Option<u32>,
-    pub tokens: Vec<TokenAmount>,
+    /// Tokens in box.
+    pub tokens: Vec<BoxTokenAmount>,
 }
 
 /// Token amount in a box.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct TokenAmount {
+pub struct BoxTokenAmount {
+    /// Token ID (hex).
+    #[schema(example = "0000000000000000000000000000000000000000000000000000000000000000")]
     pub token_id: String,
+    /// Token amount.
+    #[schema(example = 1000)]
     pub amount: u64,
 }
 
 /// Token info response.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TokenInfoResponse {
+    /// Token ID (hex).
+    #[schema(example = "0000000000000000000000000000000000000000000000000000000000000000")]
     pub token_id: String,
+    /// Box ID where token was created.
     pub creation_box_id: Option<String>,
+    /// Total token amount.
     pub amount: Option<u64>,
+    /// Token name.
+    #[schema(example = "MyToken")]
     pub name: Option<String>,
+    /// Token description.
     pub description: Option<String>,
+    /// Token decimals.
+    #[schema(example = 8)]
     pub decimals: Option<u8>,
+    /// Number of boxes containing this token.
+    #[schema(example = 100)]
     pub box_count: usize,
 }
 
 /// Address balance response.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AddressBalanceResponse {
+    /// Address hash (ErgoTree hash, hex).
+    #[schema(example = "0000000000000000000000000000000000000000000000000000000000000000")]
     pub address_hash: String,
+    /// Balance in nanoERG.
+    #[schema(example = 1000000000)]
     pub nano_ergs: i64,
-    pub tokens: Vec<TokenBalance>,
+    /// Token balances.
+    pub tokens: Vec<IndexedTokenBalance>,
+    /// Number of transactions.
+    #[schema(example = 50)]
     pub tx_count: usize,
+    /// Total box count.
+    #[schema(example = 100)]
     pub box_count: usize,
+    /// Unspent box count.
+    #[schema(example = 10)]
     pub unspent_box_count: usize,
 }
 
-/// Token balance.
-#[derive(Debug, Serialize)]
+/// Indexed token balance.
+#[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct TokenBalance {
+pub struct IndexedTokenBalance {
+    /// Token ID (hex).
+    #[schema(example = "0000000000000000000000000000000000000000000000000000000000000000")]
     pub token_id: String,
+    /// Token balance (can be negative for spent).
+    #[schema(example = 1000)]
     pub amount: i64,
 }
 
-/// Paginated response wrapper.
-#[derive(Debug, Serialize)]
-pub struct PaginatedResponse<T> {
-    pub items: Vec<T>,
+/// Paginated box response.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct PaginatedBoxResponse {
+    /// Response items.
+    pub items: Vec<IndexedBoxResponse>,
+    /// Total count.
+    #[schema(example = 100)]
     pub total: u64,
 }
 
-/// Error response.
+/// Generic paginated response wrapper (internal use).
 #[derive(Debug, Serialize)]
-pub struct ErrorResponse {
+pub struct PaginatedResponse<T> {
+    /// Response items.
+    pub items: Vec<T>,
+    /// Total count.
+    pub total: u64,
+}
+
+/// Blockchain error response.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct BlockchainErrorResponse {
+    /// Error message.
+    #[schema(example = "Extra indexing is not enabled")]
     pub error: String,
 }
 
@@ -133,7 +213,9 @@ pub struct ErrorResponse {
 const MAX_ITEMS: usize = 16384;
 
 /// Check if indexer is enabled and return error if not.
-fn check_indexer_enabled(state: &AppState) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+fn check_indexer_enabled(
+    state: &AppState,
+) -> Result<(), (StatusCode, Json<BlockchainErrorResponse>)> {
     if let Some(ref indexer) = state.indexer {
         if indexer.is_enabled() {
             return Ok(());
@@ -141,7 +223,7 @@ fn check_indexer_enabled(state: &AppState) -> Result<(), (StatusCode, Json<Error
     }
     Err((
         StatusCode::SERVICE_UNAVAILABLE,
-        Json(ErrorResponse {
+        Json(BlockchainErrorResponse {
             error: "Extra indexing is not enabled".to_string(),
         }),
     ))
@@ -150,9 +232,18 @@ fn check_indexer_enabled(state: &AppState) -> Result<(), (StatusCode, Json<Error
 /// GET /blockchain/indexedHeight
 ///
 /// Get the current indexed height and full blockchain height.
+#[utoipa::path(
+    get,
+    path = "/blockchain/indexedHeight",
+    tag = "blockchain",
+    responses(
+        (status = 200, description = "Indexed height info", body = IndexedHeightResponse),
+        (status = 503, description = "Indexer not enabled", body = BlockchainErrorResponse)
+    )
+)]
 pub async fn get_indexed_height(
     State(state): State<AppState>,
-) -> Result<Json<IndexedHeightResponse>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<IndexedHeightResponse>, (StatusCode, Json<BlockchainErrorResponse>)> {
     check_indexer_enabled(&state)?;
 
     let indexer = state.indexer.as_ref().unwrap();
@@ -170,10 +261,20 @@ pub async fn get_indexed_height(
 /// GET /blockchain/transaction/byId/{id}
 ///
 /// Get transaction by its ID.
+#[utoipa::path(
+    get,
+    path = "/blockchain/transaction/byId/{id}",
+    tag = "blockchain",
+    params(("id" = String, Path, description = "Transaction ID (hex)")),
+    responses(
+        (status = 200, description = "Transaction found", body = Option<IndexedTransactionResponse>),
+        (status = 503, description = "Indexer not enabled", body = BlockchainErrorResponse)
+    )
+)]
 pub async fn get_transaction_by_id(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Result<Json<Option<TransactionResponse>>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<Option<IndexedTransactionResponse>>, (StatusCode, Json<BlockchainErrorResponse>)> {
     check_indexer_enabled(&state)?;
 
     let tx_id = parse_hex_id(&id)?;
@@ -181,7 +282,7 @@ pub async fn get_transaction_by_id(
 
     let tx = indexer
         .get_transaction(&tx_id)
-        .map(|itx| TransactionResponse {
+        .map(|itx| IndexedTransactionResponse {
             id: hex::encode(itx.tx_id),
             tx_index: itx.tx_index,
             height: itx.height,
@@ -198,10 +299,20 @@ pub async fn get_transaction_by_id(
 /// GET /blockchain/transaction/byIndex/{index}
 ///
 /// Get transaction by its global index.
+#[utoipa::path(
+    get,
+    path = "/blockchain/transaction/byIndex/{index}",
+    tag = "blockchain",
+    params(("index" = u64, Path, description = "Global transaction index")),
+    responses(
+        (status = 200, description = "Transaction found", body = Option<IndexedTransactionResponse>),
+        (status = 503, description = "Indexer not enabled", body = BlockchainErrorResponse)
+    )
+)]
 pub async fn get_transaction_by_index(
     State(state): State<AppState>,
     Path(index): Path<u64>,
-) -> Result<Json<Option<TransactionResponse>>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<Option<IndexedTransactionResponse>>, (StatusCode, Json<BlockchainErrorResponse>)> {
     check_indexer_enabled(&state)?;
 
     let indexer = state.indexer.as_ref().unwrap();
@@ -218,10 +329,20 @@ pub async fn get_transaction_by_index(
 /// GET /blockchain/box/byId/{id}
 ///
 /// Get box by its ID.
+#[utoipa::path(
+    get,
+    path = "/blockchain/box/byId/{id}",
+    tag = "blockchain",
+    params(("id" = String, Path, description = "Box ID (hex)")),
+    responses(
+        (status = 200, description = "Box found", body = Option<IndexedBoxResponse>),
+        (status = 503, description = "Indexer not enabled", body = BlockchainErrorResponse)
+    )
+)]
 pub async fn get_box_by_id(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Result<Json<Option<BoxResponse>>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<Option<IndexedBoxResponse>>, (StatusCode, Json<BlockchainErrorResponse>)> {
     check_indexer_enabled(&state)?;
 
     let box_id = parse_hex_id(&id)?;
@@ -235,10 +356,20 @@ pub async fn get_box_by_id(
 /// GET /blockchain/box/byIndex/{index}
 ///
 /// Get box by its global index.
+#[utoipa::path(
+    get,
+    path = "/blockchain/box/byIndex/{index}",
+    tag = "blockchain",
+    params(("index" = u64, Path, description = "Global box index")),
+    responses(
+        (status = 200, description = "Box found", body = Option<IndexedBoxResponse>),
+        (status = 503, description = "Indexer not enabled", body = BlockchainErrorResponse)
+    )
+)]
 pub async fn get_box_by_index(
     State(state): State<AppState>,
     Path(index): Path<u64>,
-) -> Result<Json<Option<BoxResponse>>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<Option<IndexedBoxResponse>>, (StatusCode, Json<BlockchainErrorResponse>)> {
     check_indexer_enabled(&state)?;
 
     let indexer = state.indexer.as_ref().unwrap();
@@ -253,10 +384,20 @@ pub async fn get_box_by_index(
 /// GET /blockchain/token/byId/{id}
 ///
 /// Get token information by ID.
+#[utoipa::path(
+    get,
+    path = "/blockchain/token/byId/{id}",
+    tag = "blockchain",
+    params(("id" = String, Path, description = "Token ID (hex)")),
+    responses(
+        (status = 200, description = "Token info", body = Option<TokenInfoResponse>),
+        (status = 503, description = "Indexer not enabled", body = BlockchainErrorResponse)
+    )
+)]
 pub async fn get_token_by_id(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Result<Json<Option<TokenInfoResponse>>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<Option<TokenInfoResponse>>, (StatusCode, Json<BlockchainErrorResponse>)> {
     check_indexer_enabled(&state)?;
 
     let token_id = parse_hex_id(&id)?;
@@ -279,18 +420,29 @@ pub async fn get_token_by_id(
 }
 
 /// Address query params.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, IntoParams)]
 pub struct AddressQuery {
+    /// Address (ErgoTree hash, hex).
     pub address: String,
 }
 
 /// GET /blockchain/balance/byAddress
 ///
 /// Get balance for an address (by ErgoTree hash).
+#[utoipa::path(
+    get,
+    path = "/blockchain/balance/byAddress",
+    tag = "blockchain",
+    params(AddressQuery),
+    responses(
+        (status = 200, description = "Address balance", body = Option<AddressBalanceResponse>),
+        (status = 503, description = "Indexer not enabled", body = BlockchainErrorResponse)
+    )
+)]
 pub async fn get_balance_by_address(
     State(state): State<AppState>,
     Query(query): Query<AddressQuery>,
-) -> Result<Json<Option<AddressBalanceResponse>>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<Option<AddressBalanceResponse>>, (StatusCode, Json<BlockchainErrorResponse>)> {
     check_indexer_enabled(&state)?;
 
     let tree_hash = parse_hex_id(&query.address)?;
@@ -305,7 +457,7 @@ pub async fn get_balance_by_address(
                 .balance
                 .tokens
                 .iter()
-                .map(|(id, amount)| TokenBalance {
+                .map(|(id, amount)| IndexedTokenBalance {
                     token_id: hex::encode(id),
                     amount: *amount,
                 })
@@ -319,13 +471,17 @@ pub async fn get_balance_by_address(
 }
 
 /// Boxes by address query params.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, IntoParams)]
 pub struct BoxesByAddressQuery {
+    /// Address (ErgoTree hash, hex).
     pub address: String,
+    /// Offset for pagination.
     #[serde(default)]
     pub offset: usize,
+    /// Limit (default: 5).
     #[serde(default = "default_limit")]
     pub limit: usize,
+    /// Only return unspent boxes.
     #[serde(default)]
     pub unspent_only: bool,
 }
@@ -333,16 +489,28 @@ pub struct BoxesByAddressQuery {
 /// GET /blockchain/box/byAddress
 ///
 /// Get boxes for an address.
+#[utoipa::path(
+    get,
+    path = "/blockchain/box/byAddress",
+    tag = "blockchain",
+    params(BoxesByAddressQuery),
+    responses(
+        (status = 200, description = "Paginated boxes", body = PaginatedBoxResponse),
+        (status = 400, description = "Invalid request", body = BlockchainErrorResponse),
+        (status = 503, description = "Indexer not enabled", body = BlockchainErrorResponse)
+    )
+)]
 pub async fn get_boxes_by_address(
     State(state): State<AppState>,
     Query(query): Query<BoxesByAddressQuery>,
-) -> Result<Json<PaginatedResponse<BoxResponse>>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<PaginatedResponse<IndexedBoxResponse>>, (StatusCode, Json<BlockchainErrorResponse>)>
+{
     check_indexer_enabled(&state)?;
 
     if query.limit > MAX_ITEMS {
         return Err((
             StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
+            Json(BlockchainErrorResponse {
                 error: format!("No more than {} boxes can be requested", MAX_ITEMS),
             }),
         ));
@@ -365,7 +533,7 @@ pub async fn get_boxes_by_address(
             };
 
             let total = box_indexes.len() as u64;
-            let boxes: Vec<BoxResponse> = box_indexes
+            let boxes: Vec<IndexedBoxResponse> = box_indexes
                 .into_iter()
                 .skip(query.offset)
                 .take(query.limit)
@@ -382,13 +550,17 @@ pub async fn get_boxes_by_address(
 }
 
 /// Boxes by token query params.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, IntoParams)]
 pub struct BoxesByTokenQuery {
+    /// Token ID (hex).
     pub token_id: String,
+    /// Offset for pagination.
     #[serde(default)]
     pub offset: usize,
+    /// Limit (default: 5).
     #[serde(default = "default_limit")]
     pub limit: usize,
+    /// Only return unspent boxes.
     #[serde(default)]
     pub unspent_only: bool,
 }
@@ -396,16 +568,28 @@ pub struct BoxesByTokenQuery {
 /// GET /blockchain/box/byTokenId
 ///
 /// Get boxes containing a specific token.
+#[utoipa::path(
+    get,
+    path = "/blockchain/box/byTokenId",
+    tag = "blockchain",
+    params(BoxesByTokenQuery),
+    responses(
+        (status = 200, description = "Paginated boxes", body = PaginatedBoxResponse),
+        (status = 400, description = "Invalid request", body = BlockchainErrorResponse),
+        (status = 503, description = "Indexer not enabled", body = BlockchainErrorResponse)
+    )
+)]
 pub async fn get_boxes_by_token_id(
     State(state): State<AppState>,
     Query(query): Query<BoxesByTokenQuery>,
-) -> Result<Json<PaginatedResponse<BoxResponse>>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<PaginatedResponse<IndexedBoxResponse>>, (StatusCode, Json<BlockchainErrorResponse>)>
+{
     check_indexer_enabled(&state)?;
 
     if query.limit > MAX_ITEMS {
         return Err((
             StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
+            Json(BlockchainErrorResponse {
                 error: format!("No more than {} boxes can be requested", MAX_ITEMS),
             }),
         ));
@@ -434,7 +618,7 @@ pub async fn get_boxes_by_token_id(
             };
 
             let total = box_indexes.len() as u64;
-            let boxes: Vec<BoxResponse> = box_indexes
+            let boxes: Vec<IndexedBoxResponse> = box_indexes
                 .into_iter()
                 .skip(query.offset)
                 .take(query.limit)
@@ -451,11 +635,11 @@ pub async fn get_boxes_by_token_id(
 }
 
 /// Parse a hex string to a 32-byte ID.
-fn parse_hex_id(hex_str: &str) -> Result<[u8; 32], (StatusCode, Json<ErrorResponse>)> {
+fn parse_hex_id(hex_str: &str) -> Result<[u8; 32], (StatusCode, Json<BlockchainErrorResponse>)> {
     let bytes = hex::decode(hex_str).map_err(|_| {
         (
             StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
+            Json(BlockchainErrorResponse {
                 error: "Invalid hex string".to_string(),
             }),
         )
@@ -464,7 +648,7 @@ fn parse_hex_id(hex_str: &str) -> Result<[u8; 32], (StatusCode, Json<ErrorRespon
     if bytes.len() != 32 {
         return Err((
             StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
+            Json(BlockchainErrorResponse {
                 error: "ID must be 32 bytes".to_string(),
             }),
         ));
@@ -475,9 +659,9 @@ fn parse_hex_id(hex_str: &str) -> Result<[u8; 32], (StatusCode, Json<ErrorRespon
     Ok(id)
 }
 
-/// Convert IndexedErgoBox to BoxResponse.
-fn to_box_response(ieb: &IndexedErgoBox) -> BoxResponse {
-    BoxResponse {
+/// Convert IndexedErgoBox to IndexedBoxResponse.
+fn to_box_response(ieb: &IndexedErgoBox) -> IndexedBoxResponse {
+    IndexedBoxResponse {
         box_id: hex::encode(ieb.box_id),
         inclusion_height: ieb.inclusion_height,
         global_index: ieb.global_index,
@@ -489,7 +673,7 @@ fn to_box_response(ieb: &IndexedErgoBox) -> BoxResponse {
         tokens: ieb
             .tokens
             .iter()
-            .map(|(id, amount)| TokenAmount {
+            .map(|(id, amount)| BoxTokenAmount {
                 token_id: hex::encode(id),
                 amount: *amount,
             })

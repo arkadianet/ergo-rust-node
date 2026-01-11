@@ -7,34 +7,65 @@ use axum::{
 };
 use ergo_chain_types::{BlockId, Digest32};
 use serde::{Deserialize, Serialize};
+use utoipa::{IntoParams, ToSchema};
 
 /// Block summary.
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct BlockSummary {
+    /// Block ID (hex-encoded 32 bytes).
+    #[schema(example = "0000000000000000000000000000000000000000000000000000000000000000")]
     pub id: String,
+    /// Block height.
+    #[schema(example = 1234567)]
     pub height: u32,
+    /// Block timestamp (Unix milliseconds).
+    #[schema(example = 1704067200000_u64)]
     pub timestamp: u64,
+    /// Number of transactions in the block.
+    #[schema(example = 5)]
     pub transactions_count: usize,
 }
 
 /// Block header response.
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct BlockHeader {
+    /// Block ID (hex-encoded 32 bytes).
+    #[schema(example = "0000000000000000000000000000000000000000000000000000000000000000")]
     pub id: String,
+    /// Parent block ID (hex-encoded 32 bytes).
+    #[schema(example = "0000000000000000000000000000000000000000000000000000000000000000")]
     pub parent_id: String,
+    /// Block height.
+    #[schema(example = 1234567)]
     pub height: u32,
+    /// Block timestamp (Unix milliseconds).
+    #[schema(example = 1704067200000_u64)]
     pub timestamp: u64,
+    /// Compact difficulty representation.
+    #[schema(example = 117440512)]
     pub n_bits: u32,
+    /// Human-readable difficulty.
+    #[schema(example = "117440512")]
     pub difficulty: String,
 }
 
-/// Pagination query.
-#[derive(Deserialize, Default)]
+/// Block transactions response.
+#[derive(Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct BlockTransactions {
+    /// List of transaction IDs in the block.
+    pub transactions: Vec<String>,
+}
+
+/// Pagination query parameters.
+#[derive(Deserialize, Default, IntoParams)]
 pub struct Pagination {
+    /// Offset for pagination.
     #[serde(default)]
     pub offset: u32,
+    /// Number of items to return (default: 50).
     #[serde(default = "default_limit")]
     pub limit: u32,
 }
@@ -44,6 +75,17 @@ fn default_limit() -> u32 {
 }
 
 /// GET /blocks
+///
+/// Get list of block summaries with pagination.
+#[utoipa::path(
+    get,
+    path = "/blocks",
+    tag = "blocks",
+    params(Pagination),
+    responses(
+        (status = 200, description = "List of block summaries", body = Vec<BlockSummary>)
+    )
+)]
 pub async fn get_blocks(
     State(state): State<AppState>,
     Query(pagination): Query<Pagination>,
@@ -68,6 +110,21 @@ pub async fn get_blocks(
 }
 
 /// GET /blocks/:id
+///
+/// Get block summary by block ID.
+#[utoipa::path(
+    get,
+    path = "/blocks/{id}",
+    tag = "blocks",
+    params(
+        ("id" = String, Path, description = "Block ID (hex-encoded 32 bytes)")
+    ),
+    responses(
+        (status = 200, description = "Block summary", body = BlockSummary),
+        (status = 400, description = "Invalid block ID", body = crate::error::ErrorResponse),
+        (status = 404, description = "Block not found", body = crate::error::ErrorResponse)
+    )
+)]
 pub async fn get_block_by_id(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -90,6 +147,21 @@ pub async fn get_block_by_id(
 }
 
 /// GET /blocks/:id/header
+///
+/// Get block header by block ID.
+#[utoipa::path(
+    get,
+    path = "/blocks/{id}/header",
+    tag = "blocks",
+    params(
+        ("id" = String, Path, description = "Block ID (hex-encoded 32 bytes)")
+    ),
+    responses(
+        (status = 200, description = "Block header", body = BlockHeader),
+        (status = 400, description = "Invalid block ID", body = crate::error::ErrorResponse),
+        (status = 404, description = "Block not found", body = crate::error::ErrorResponse)
+    )
+)]
 pub async fn get_block_header(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -114,6 +186,21 @@ pub async fn get_block_header(
 }
 
 /// GET /blocks/:id/transactions
+///
+/// Get transaction IDs in a block.
+#[utoipa::path(
+    get,
+    path = "/blocks/{id}/transactions",
+    tag = "blocks",
+    params(
+        ("id" = String, Path, description = "Block ID (hex-encoded 32 bytes)")
+    ),
+    responses(
+        (status = 200, description = "List of transaction IDs", body = Vec<String>),
+        (status = 400, description = "Invalid block ID", body = crate::error::ErrorResponse),
+        (status = 404, description = "Block not found", body = crate::error::ErrorResponse)
+    )
+)]
 pub async fn get_block_transactions(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -138,6 +225,20 @@ pub async fn get_block_transactions(
 }
 
 /// GET /blocks/at/:height
+///
+/// Get block summary at a specific height.
+#[utoipa::path(
+    get,
+    path = "/blocks/at/{height}",
+    tag = "blocks",
+    params(
+        ("height" = u32, Path, description = "Block height")
+    ),
+    responses(
+        (status = 200, description = "Block summary", body = BlockSummary),
+        (status = 404, description = "Block not found at height", body = crate::error::ErrorResponse)
+    )
+)]
 pub async fn get_block_at_height(
     State(state): State<AppState>,
     Path(height): Path<u32>,

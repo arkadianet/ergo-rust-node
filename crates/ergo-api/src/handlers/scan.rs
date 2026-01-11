@@ -10,34 +10,42 @@ use axum::{
 };
 use ergo_storage::{Scan, ScanBox, ScanId, ScanRequest, ScanWalletInteraction, ScanningPredicate};
 use serde::{Deserialize, Serialize};
+use utoipa::{IntoParams, ToSchema};
 
 /// Scan ID wrapper for JSON responses.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ScanIdWrapper {
+    /// Scan identifier.
+    #[schema(example = 1)]
     pub scan_id: ScanId,
 }
 
 /// Scan ID and Box ID for stop tracking requests.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ScanIdBoxId {
+    /// Scan identifier.
+    #[schema(example = 1)]
     pub scan_id: ScanId,
-    pub box_id: String, // hex-encoded
+    /// Box ID (hex-encoded).
+    #[schema(example = "0000000000000000000000000000000000000000000000000000000000000000")]
+    pub box_id: String,
 }
 
 /// Box with scan IDs for add box requests.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct BoxWithScanIds {
     /// Serialized box data (hex-encoded).
+    #[schema(example = "80a0...")]
     pub box_bytes: String,
     /// Scan IDs to associate with this box.
     pub scan_ids: Vec<ScanId>,
 }
 
 /// Query parameters for box listing.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, IntoParams)]
 #[serde(rename_all = "camelCase")]
 pub struct BoxQueryParams {
     /// Minimum confirmations (-1 for unconfirmed).
@@ -77,14 +85,17 @@ fn default_limit() -> usize {
 }
 
 /// Box response matching Scala node format.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct WalletBoxResponse {
+pub struct ScanBoxResponse {
     /// Box ID (hex).
+    #[schema(example = "0000000000000000000000000000000000000000000000000000000000000000")]
     pub box_id: String,
     /// Inclusion height.
+    #[schema(example = 1000000)]
     pub inclusion_height: u32,
     /// Number of confirmations.
+    #[schema(example = 100)]
     pub confirmations_num: u32,
     /// Whether the box is spent.
     pub spent: bool,
@@ -98,7 +109,7 @@ pub struct WalletBoxResponse {
     pub scan_ids: Vec<ScanId>,
 }
 
-impl From<ScanBox> for WalletBoxResponse {
+impl From<ScanBox> for ScanBoxResponse {
     fn from(b: ScanBox) -> Self {
         Self {
             box_id: hex::encode(&b.box_id),
@@ -113,13 +124,22 @@ impl From<ScanBox> for WalletBoxResponse {
 }
 
 /// Scan response.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ScanResponse {
+    /// Scan identifier.
+    #[schema(example = 1)]
     pub scan_id: ScanId,
+    /// Scan name.
+    #[schema(example = "my-scan")]
     pub scan_name: String,
+    /// Tracking rule predicate.
+    #[schema(value_type = Object)]
     pub tracking_rule: ScanningPredicate,
+    /// Wallet interaction mode.
+    #[schema(value_type = String, example = "off")]
     pub wallet_interaction: ScanWalletInteraction,
+    /// Remove offchain boxes.
     pub remove_offchain: bool,
 }
 
@@ -135,9 +155,44 @@ impl From<Scan> for ScanResponse {
     }
 }
 
+/// P2S address request for tracking.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct P2SAddressRequest {
+    /// P2S address (base58).
+    #[schema(example = "9fRAWhdxEsTcdb8PhGNrZfwqa65zfkuYHAMmkQLcic1gdLSV5vA")]
+    pub address: String,
+}
+
+/// Scan registration request wrapper.
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanRegistrationRequest {
+    /// Scan name.
+    #[schema(example = "my-scan")]
+    pub scan_name: String,
+    /// Tracking rule (JSON predicate).
+    #[schema(value_type = Object)]
+    pub tracking_rule: serde_json::Value,
+    /// Wallet interaction mode.
+    #[schema(example = "off")]
+    pub wallet_interaction: Option<String>,
+    /// Remove offchain boxes.
+    pub remove_offchain: Option<bool>,
+}
+
 /// Register a new scan.
 ///
 /// POST /scan/register
+#[utoipa::path(
+    post,
+    path = "/scan/register",
+    tag = "scan",
+    request_body = ScanRegistrationRequest,
+    responses(
+        (status = 200, description = "Scan registered", body = ScanIdWrapper),
+        (status = 400, description = "Invalid request", body = crate::error::ErrorResponse)
+    )
+)]
 pub async fn register(
     State(state): State<AppState>,
     Json(request): Json<ScanRequest>,
@@ -159,6 +214,16 @@ pub async fn register(
 /// Deregister (remove) a scan.
 ///
 /// POST /scan/deregister
+#[utoipa::path(
+    post,
+    path = "/scan/deregister",
+    tag = "scan",
+    request_body = ScanIdWrapper,
+    responses(
+        (status = 200, description = "Scan deregistered", body = ScanIdWrapper),
+        (status = 400, description = "Invalid scan ID", body = crate::error::ErrorResponse)
+    )
+)]
 pub async fn deregister(
     State(state): State<AppState>,
     Json(wrapper): Json<ScanIdWrapper>,
@@ -178,6 +243,15 @@ pub async fn deregister(
 /// List all registered scans.
 ///
 /// GET /scan/listAll
+#[utoipa::path(
+    get,
+    path = "/scan/listAll",
+    tag = "scan",
+    responses(
+        (status = 200, description = "List of scans", body = Vec<ScanResponse>),
+        (status = 400, description = "Scan storage not enabled", body = crate::error::ErrorResponse)
+    )
+)]
 pub async fn list_all(State(state): State<AppState>) -> ApiResult<Json<Vec<ScanResponse>>> {
     let scan_storage = state
         .scan_storage
@@ -196,11 +270,24 @@ pub async fn list_all(State(state): State<AppState>) -> ApiResult<Json<Vec<ScanR
 /// Get unspent boxes for a scan.
 ///
 /// GET /scan/unspentBoxes/{scanId}
+#[utoipa::path(
+    get,
+    path = "/scan/unspentBoxes/{scanId}",
+    tag = "scan",
+    params(
+        ("scanId" = i16, Path, description = "Scan ID"),
+        BoxQueryParams
+    ),
+    responses(
+        (status = 200, description = "Unspent boxes", body = Vec<ScanBoxResponse>),
+        (status = 400, description = "Invalid scan ID", body = crate::error::ErrorResponse)
+    )
+)]
 pub async fn unspent_boxes(
     State(state): State<AppState>,
     Path(scan_id): Path<i16>,
     Query(params): Query<BoxQueryParams>,
-) -> ApiResult<Json<Vec<WalletBoxResponse>>> {
+) -> ApiResult<Json<Vec<ScanBoxResponse>>> {
     let scan_storage = state
         .scan_storage
         .as_ref()
@@ -212,7 +299,7 @@ pub async fn unspent_boxes(
 
     // Apply filters
     let current_height = state.state.utxo.height();
-    let filtered: Vec<WalletBoxResponse> = boxes
+    let filtered: Vec<ScanBoxResponse> = boxes
         .into_iter()
         .filter(|b| {
             let confirmations = current_height.saturating_sub(b.inclusion_height) as i32;
@@ -232,11 +319,24 @@ pub async fn unspent_boxes(
 /// Get spent boxes for a scan.
 ///
 /// GET /scan/spentBoxes/{scanId}
+#[utoipa::path(
+    get,
+    path = "/scan/spentBoxes/{scanId}",
+    tag = "scan",
+    params(
+        ("scanId" = i16, Path, description = "Scan ID"),
+        BoxQueryParams
+    ),
+    responses(
+        (status = 200, description = "Spent boxes", body = Vec<ScanBoxResponse>),
+        (status = 400, description = "Invalid scan ID", body = crate::error::ErrorResponse)
+    )
+)]
 pub async fn spent_boxes(
     State(state): State<AppState>,
     Path(scan_id): Path<i16>,
     Query(params): Query<BoxQueryParams>,
-) -> ApiResult<Json<Vec<WalletBoxResponse>>> {
+) -> ApiResult<Json<Vec<ScanBoxResponse>>> {
     let scan_storage = state
         .scan_storage
         .as_ref()
@@ -248,7 +348,7 @@ pub async fn spent_boxes(
 
     // Apply filters
     let current_height = state.state.utxo.height();
-    let filtered: Vec<WalletBoxResponse> = boxes
+    let filtered: Vec<ScanBoxResponse> = boxes
         .into_iter()
         .filter(|b| {
             let confirmations = current_height.saturating_sub(b.inclusion_height) as i32;
@@ -268,6 +368,16 @@ pub async fn spent_boxes(
 /// Stop tracking a box for a scan.
 ///
 /// POST /scan/stopTracking
+#[utoipa::path(
+    post,
+    path = "/scan/stopTracking",
+    tag = "scan",
+    request_body = ScanIdBoxId,
+    responses(
+        (status = 200, description = "Box tracking stopped", body = ScanIdBoxId),
+        (status = 400, description = "Invalid request", body = crate::error::ErrorResponse)
+    )
+)]
 pub async fn stop_tracking(
     State(state): State<AppState>,
     Json(request): Json<ScanIdBoxId>,
@@ -290,6 +400,16 @@ pub async fn stop_tracking(
 /// Manually add a box to scans.
 ///
 /// POST /scan/addBox
+#[utoipa::path(
+    post,
+    path = "/scan/addBox",
+    tag = "scan",
+    request_body = BoxWithScanIds,
+    responses(
+        (status = 200, description = "Box added, returns box ID", body = String),
+        (status = 400, description = "Invalid request", body = crate::error::ErrorResponse)
+    )
+)]
 pub async fn add_box(
     State(state): State<AppState>,
     Json(request): Json<BoxWithScanIds>,
@@ -324,9 +444,19 @@ pub async fn add_box(
 /// Creates a scan that tracks boxes with a specific P2S address.
 ///
 /// POST /scan/p2sRule
+#[utoipa::path(
+    post,
+    path = "/scan/p2sRule",
+    tag = "scan",
+    request_body = P2SAddressRequest,
+    responses(
+        (status = 200, description = "Scan created for P2S address", body = ScanIdWrapper),
+        (status = 400, description = "Invalid address", body = crate::error::ErrorResponse)
+    )
+)]
 pub async fn p2s_rule(
     State(state): State<AppState>,
-    Json(address): Json<String>,
+    Json(request): Json<P2SAddressRequest>,
 ) -> ApiResult<Json<ScanIdWrapper>> {
     let scan_storage = state
         .scan_storage
@@ -341,22 +471,22 @@ pub async fn p2s_rule(
     // In a full implementation, we'd parse the address and extract the ErgoTree
 
     // R1 is the propositionBytes register (index 1)
-    let address_bytes = address.as_bytes().to_vec();
+    let address_bytes = request.address.as_bytes().to_vec();
 
     let tracking_rule = ScanningPredicate::Equals {
         reg_id: 1, // R1 = propositionBytes
         value: address_bytes,
     };
 
-    let request = ScanRequest {
-        scan_name: address.clone(),
+    let scan_request = ScanRequest {
+        scan_name: request.address.clone(),
         tracking_rule,
         wallet_interaction: Some(ScanWalletInteraction::Off),
         remove_offchain: Some(true),
     };
 
     let scan = scan_storage
-        .register(request)
+        .register(scan_request)
         .map_err(|e| ApiError::BadRequest(e))?;
 
     Ok(Json(ScanIdWrapper {

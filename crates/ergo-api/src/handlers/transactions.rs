@@ -6,6 +6,7 @@ use axum::{
     Json,
 };
 use serde::{Deserialize, Serialize};
+use utoipa::{IntoParams, ToSchema};
 
 // ==================== Constants ====================
 
@@ -22,33 +23,44 @@ const MIN_TX_SIZE: usize = 100;
 const MAX_TX_SIZE: usize = 1_000_000;
 
 /// Transaction submission request.
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct SubmitTx {
-    /// Serialized transaction (hex or base64).
+    /// Serialized transaction bytes (hex-encoded).
+    #[schema(example = "80a0...")]
     pub bytes: String,
 }
 
 /// Transaction response.
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TxResponse {
+    /// Transaction ID (hex-encoded 32 bytes).
+    #[schema(example = "0000000000000000000000000000000000000000000000000000000000000000")]
     pub id: String,
 }
 
 /// Unconfirmed transaction info.
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct UnconfirmedTx {
+    /// Transaction ID (hex-encoded).
+    #[schema(example = "0000000000000000000000000000000000000000000000000000000000000000")]
     pub id: String,
+    /// Transaction fee in nanoERG.
+    #[schema(example = 1000000)]
     pub fee: u64,
+    /// Transaction size in bytes.
+    #[schema(example = 300)]
     pub size: usize,
 }
 
 /// Pagination parameters.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, IntoParams)]
 pub struct PaginationParams {
+    /// Offset for pagination.
     #[serde(default)]
     pub offset: usize,
+    /// Number of items to return (default: 50).
     #[serde(default = "default_limit")]
     pub limit: usize,
 }
@@ -58,12 +70,12 @@ fn default_limit() -> usize {
 }
 
 /// Fee histogram parameters.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, IntoParams)]
 pub struct FeeHistogramParams {
-    /// Number of bins for the histogram.
+    /// Number of bins for the histogram (default: 10).
     #[serde(default = "default_bins")]
     pub bins: usize,
-    /// Maximum time in milliseconds.
+    /// Maximum time in milliseconds (default: 60000).
     #[serde(default = "default_max_time")]
     pub maxtime: u64,
 }
@@ -77,12 +89,12 @@ fn default_max_time() -> u64 {
 }
 
 /// Fee request parameters.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, IntoParams)]
 pub struct FeeRequestParams {
-    /// Expected wait time in milliseconds.
+    /// Expected wait time in milliseconds (default: 1000).
     #[serde(default = "default_wait_time")]
     pub wait_time: u64,
-    /// Transaction size in bytes.
+    /// Transaction size in bytes (default: 300).
     #[serde(default = "default_tx_size")]
     pub tx_size: usize,
 }
@@ -96,52 +108,69 @@ fn default_tx_size() -> usize {
 }
 
 /// Wait time request parameters.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, IntoParams)]
 pub struct WaitTimeParams {
     /// Fee in nanoERG.
     pub fee: u64,
-    /// Transaction size in bytes.
+    /// Transaction size in bytes (default: 300).
     #[serde(default = "default_tx_size")]
     pub tx_size: usize,
 }
 
 /// Fee histogram entry.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct FeeHistogramEntry {
     /// Number of transactions in this bin.
+    #[schema(example = 5)]
     pub n_txns: usize,
     /// Total size of transactions in this bin.
+    #[schema(example = 1500)]
     pub total_size: usize,
 }
 
 /// Recommended fee response.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct RecommendedFee {
     /// Recommended fee in nanoERG.
+    #[schema(example = 1000000)]
     pub fee: u64,
 }
 
 /// Wait time response.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct WaitTimeResponse {
     /// Expected wait time in milliseconds.
+    #[schema(example = 120000)]
     pub wait_time: u64,
 }
 
 /// Transaction check response.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct CheckTxResponse {
     /// Whether the transaction is valid.
     pub success: bool,
     /// Error message if invalid.
+    #[schema(example = "Transaction too small")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 
 /// POST /transactions
+///
+/// Submit a new transaction to the mempool.
+#[utoipa::path(
+    post,
+    path = "/transactions",
+    tag = "transactions",
+    request_body = SubmitTx,
+    responses(
+        (status = 200, description = "Transaction submitted", body = TxResponse),
+        (status = 400, description = "Invalid transaction", body = crate::error::ErrorResponse)
+    )
+)]
 pub async fn submit_transaction(
     State(state): State<AppState>,
     Json(request): Json<SubmitTx>,
@@ -174,6 +203,18 @@ pub async fn submit_transaction(
 }
 
 /// GET /transactions/:id
+///
+/// Get transaction by ID (from chain or mempool).
+#[utoipa::path(
+    get,
+    path = "/transactions/{id}",
+    tag = "transactions",
+    params(("id" = String, Path, description = "Transaction ID (hex)")),
+    responses(
+        (status = 200, description = "Transaction found", body = serde_json::Value),
+        (status = 404, description = "Transaction not found", body = crate::error::ErrorResponse)
+    )
+)]
 pub async fn get_transaction(
     State(_state): State<AppState>,
     Path(id): Path<String>,
@@ -183,6 +224,16 @@ pub async fn get_transaction(
 }
 
 /// GET /transactions/unconfirmed
+///
+/// Get all unconfirmed transactions in mempool.
+#[utoipa::path(
+    get,
+    path = "/transactions/unconfirmed",
+    tag = "transactions",
+    responses(
+        (status = 200, description = "List of unconfirmed transactions", body = Vec<UnconfirmedTx>)
+    )
+)]
 pub async fn get_unconfirmed(State(state): State<AppState>) -> ApiResult<Json<Vec<UnconfirmedTx>>> {
     let txs: Vec<UnconfirmedTx> = state
         .mempool
@@ -201,6 +252,18 @@ pub async fn get_unconfirmed(State(state): State<AppState>) -> ApiResult<Json<Ve
 }
 
 /// GET /transactions/unconfirmed/:id
+///
+/// Get unconfirmed transaction by ID.
+#[utoipa::path(
+    get,
+    path = "/transactions/unconfirmed/{id}",
+    tag = "transactions",
+    params(("id" = String, Path, description = "Transaction ID (hex)")),
+    responses(
+        (status = 200, description = "Unconfirmed transaction", body = UnconfirmedTx),
+        (status = 404, description = "Transaction not found", body = crate::error::ErrorResponse)
+    )
+)]
 pub async fn get_unconfirmed_by_id(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -221,7 +284,18 @@ pub async fn get_unconfirmed_by_id(
 }
 
 /// POST /transactions/check
+///
 /// Validate a transaction without submitting it.
+#[utoipa::path(
+    post,
+    path = "/transactions/check",
+    tag = "transactions",
+    request_body = SubmitTx,
+    responses(
+        (status = 200, description = "Validation result", body = CheckTxResponse),
+        (status = 400, description = "Invalid input", body = crate::error::ErrorResponse)
+    )
+)]
 pub async fn check_transaction(
     State(_state): State<AppState>,
     Json(request): Json<SubmitTx>,
@@ -255,7 +329,17 @@ pub async fn check_transaction(
 }
 
 /// GET /transactions/poolHistogram
+///
 /// Get fee histogram of mempool transactions.
+#[utoipa::path(
+    get,
+    path = "/transactions/poolHistogram",
+    tag = "transactions",
+    params(FeeHistogramParams),
+    responses(
+        (status = 200, description = "Fee histogram", body = Vec<FeeHistogramEntry>)
+    )
+)]
 pub async fn get_fee_histogram(
     State(state): State<AppState>,
     Query(params): Query<FeeHistogramParams>,
@@ -300,7 +384,17 @@ pub async fn get_fee_histogram(
 }
 
 /// GET /transactions/getFee
+///
 /// Get recommended fee for a transaction.
+#[utoipa::path(
+    get,
+    path = "/transactions/getFee",
+    tag = "transactions",
+    params(FeeRequestParams),
+    responses(
+        (status = 200, description = "Recommended fee", body = RecommendedFee)
+    )
+)]
 pub async fn get_recommended_fee(
     State(state): State<AppState>,
     Query(params): Query<FeeRequestParams>,
@@ -328,7 +422,17 @@ pub async fn get_recommended_fee(
 }
 
 /// GET /transactions/waitTime
+///
 /// Get expected wait time for a transaction with given fee.
+#[utoipa::path(
+    get,
+    path = "/transactions/waitTime",
+    tag = "transactions",
+    params(WaitTimeParams),
+    responses(
+        (status = 200, description = "Expected wait time", body = WaitTimeResponse)
+    )
+)]
 pub async fn get_wait_time(
     State(state): State<AppState>,
     Query(params): Query<WaitTimeParams>,
@@ -353,6 +457,17 @@ pub async fn get_wait_time(
 }
 
 /// GET /transactions/unconfirmed with pagination
+///
+/// Get paginated unconfirmed transactions.
+#[utoipa::path(
+    get,
+    path = "/transactions/unconfirmed/paged",
+    tag = "transactions",
+    params(PaginationParams),
+    responses(
+        (status = 200, description = "Paginated unconfirmed transactions", body = Vec<UnconfirmedTx>)
+    )
+)]
 pub async fn get_unconfirmed_paged(
     State(state): State<AppState>,
     Query(params): Query<PaginationParams>,
@@ -376,7 +491,18 @@ pub async fn get_unconfirmed_paged(
 }
 
 /// GET /transactions/unconfirmed/byOutputId/:boxId
+///
 /// Get unconfirmed transaction that creates a specific output box.
+#[utoipa::path(
+    get,
+    path = "/transactions/unconfirmed/byOutputId/{boxId}",
+    tag = "transactions",
+    params(("boxId" = String, Path, description = "Box ID (hex)")),
+    responses(
+        (status = 200, description = "Transaction if found", body = Option<UnconfirmedTx>),
+        (status = 400, description = "Invalid box ID", body = crate::error::ErrorResponse)
+    )
+)]
 pub async fn get_unconfirmed_by_output_id(
     State(state): State<AppState>,
     Path(box_id): Path<String>,
@@ -405,7 +531,18 @@ pub async fn get_unconfirmed_by_output_id(
 }
 
 /// GET /transactions/unconfirmed/byTokenId/:tokenId
+///
 /// Get all unconfirmed transactions involving a specific token.
+#[utoipa::path(
+    get,
+    path = "/transactions/unconfirmed/byTokenId/{tokenId}",
+    tag = "transactions",
+    params(("tokenId" = String, Path, description = "Token ID (hex)")),
+    responses(
+        (status = 200, description = "Transactions involving token", body = Vec<UnconfirmedTx>),
+        (status = 400, description = "Invalid token ID", body = crate::error::ErrorResponse)
+    )
+)]
 pub async fn get_unconfirmed_by_token_id(
     State(state): State<AppState>,
     Path(token_id): Path<String>,
@@ -436,8 +573,19 @@ pub async fn get_unconfirmed_by_token_id(
 }
 
 /// GET /transactions/unconfirmed/byErgoTree/:tree
+///
 /// Get all unconfirmed transactions with outputs matching an ErgoTree hash.
 /// The `:tree` parameter should be the hex-encoded blake2b256 hash of the serialized ErgoTree.
+#[utoipa::path(
+    get,
+    path = "/transactions/unconfirmed/byErgoTree/{tree}",
+    tag = "transactions",
+    params(("tree" = String, Path, description = "ErgoTree hash (hex)")),
+    responses(
+        (status = 200, description = "Transactions with matching ErgoTree", body = Vec<UnconfirmedTx>),
+        (status = 400, description = "Invalid ErgoTree hash", body = crate::error::ErrorResponse)
+    )
+)]
 pub async fn get_unconfirmed_by_ergo_tree(
     State(state): State<AppState>,
     Path(ergo_tree): Path<String>,

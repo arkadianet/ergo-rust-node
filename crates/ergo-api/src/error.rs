@@ -7,6 +7,7 @@ use axum::{
 };
 use serde::Serialize;
 use thiserror::Error;
+use utoipa::ToSchema;
 
 /// API errors.
 #[derive(Error, Debug)]
@@ -45,11 +46,17 @@ pub enum ApiError {
 }
 
 /// Error response body.
-#[derive(Serialize)]
-struct ErrorResponse {
-    error: u16,
-    reason: String,
-    detail: String,
+#[derive(Serialize, ToSchema)]
+pub struct ErrorResponse {
+    /// HTTP status code.
+    #[schema(example = 400)]
+    pub error: u16,
+    /// Error reason.
+    #[schema(example = "Bad Request")]
+    pub reason: String,
+    /// Detailed error message.
+    #[schema(example = "Invalid block ID format")]
+    pub detail: String,
 }
 
 impl IntoResponse for ApiError {

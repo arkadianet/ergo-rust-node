@@ -9,6 +9,7 @@ use axum::{extract::Path, Json};
 use ergo_consensus::reemission::{ReemissionRules, ReemissionSettings};
 use once_cell::sync::Lazy;
 use serde::Serialize;
+use utoipa::ToSchema;
 
 /// Static mainnet re-emission rules (avoids re-creation on each request).
 static MAINNET_RULES: Lazy<ReemissionRules> =
@@ -20,44 +21,74 @@ static MAINNET_SETTINGS: Lazy<ReemissionSettings> = Lazy::new(ReemissionSettings
 // ==================== Response Types ====================
 
 /// Emission information at a specific height.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct EmissionInfo {
     /// Block height.
+    #[schema(example = 1000000)]
     pub height: u32,
     /// Miner reward at this height in nanoERG (after EIP-27 deductions).
+    #[schema(example = 54000000000_u64)]
     pub miner_reward: u64,
     /// Total coins issued up to this height in nanoERG.
+    #[schema(example = 75000000000000000_u64)]
     pub total_coins_issued: u64,
     /// Total remaining coins in emission contract in nanoERG.
+    #[schema(example = 22500000000000000_u64)]
     pub total_remain_coins: u64,
     /// Re-emission amount (EIP-27) redirected to re-emission contract in nanoERG.
+    #[schema(example = 12000000000_u64)]
     pub reemission_amt: u64,
 }
 
 /// Emission scripts information.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct EmissionScripts {
     /// Emission box proposition address.
+    #[schema(example = "emission_nft:...")]
     pub emission: String,
     /// Re-emission box proposition address (EIP-27).
+    #[schema(example = "reemission_nft:...")]
     pub reemission: String,
     /// Pay-to-reemission address (EIP-27).
+    #[schema(example = "reemission_token:...")]
     pub pay_to_reemission: String,
 }
 
 // ==================== Handlers ====================
 
 /// GET /emission/at/:height
-/// Get emission information at a specific block height.
+///
+/// Get emission information at a specific block height including miner reward,
+/// total coins issued, and re-emission amounts (EIP-27).
+#[utoipa::path(
+    get,
+    path = "/emission/at/{height}",
+    tag = "emission",
+    params(
+        ("height" = u32, Path, description = "Block height to query emission for")
+    ),
+    responses(
+        (status = 200, description = "Emission information at the specified height", body = EmissionInfo)
+    )
+)]
 pub async fn get_emission_at_height(Path(height): Path<u32>) -> ApiResult<Json<EmissionInfo>> {
     let info = calculate_emission_info(&MAINNET_RULES, height);
     Ok(Json(info))
 }
 
 /// GET /emission/scripts
-/// Get emission-related script addresses.
+///
+/// Get emission-related script addresses (NFT IDs for emission and re-emission contracts).
+#[utoipa::path(
+    get,
+    path = "/emission/scripts",
+    tag = "emission",
+    responses(
+        (status = 200, description = "Emission script addresses", body = EmissionScripts)
+    )
+)]
 pub async fn get_emission_scripts() -> ApiResult<Json<EmissionScripts>> {
     let settings = &*MAINNET_SETTINGS;
 

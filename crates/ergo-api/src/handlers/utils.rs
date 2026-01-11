@@ -12,6 +12,7 @@ use blake2::digest::consts::U32;
 use blake2::{Blake2b, Digest};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 /// Default seed size in bytes.
 const DEFAULT_SEED_SIZE: usize = 32;
@@ -22,64 +23,57 @@ const MAX_SEED_SIZE: usize = 64;
 // ==================== Request/Response Types ====================
 
 /// Hash request body.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct HashRequest {
-    /// Data to hash (hex encoded).
+    /// Data to hash (hex-encoded).
+    #[schema(example = "48656c6c6f20576f726c64")]
     pub data: String,
 }
 
 /// Hash response.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct HashResponse {
-    /// Blake2b-256 hash (hex encoded).
+    /// Blake2b-256 hash (hex-encoded).
+    #[schema(example = "256c83b297114d201b30179f3f0ef0cace9783622da5974326b436178aeef610")]
     pub hash: String,
 }
 
 /// Seed response.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct SeedResponse {
-    /// Random seed (hex encoded).
+    /// Random seed (hex-encoded).
+    #[schema(example = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2")]
     pub seed: String,
 }
 
 /// Address validation response.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct AddressValidationResponse {
+pub struct AddressValidation {
     /// The address that was validated.
+    #[schema(example = "9fRAWhdxEsTcdb8PhGNrZfwqa65zfkuYHAMmkQLcic1gdLSV5vA")]
     pub address: String,
     /// Whether the address is valid.
     pub is_valid: bool,
     /// Error message if invalid.
+    #[schema(example = "Invalid checksum")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 
 /// Raw address response.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct RawAddressResponse {
-    /// Raw address bytes (hex encoded).
+    /// Raw address bytes (hex-encoded).
+    #[schema(example = "0302...")]
     pub raw: String,
 }
 
-/// Address from raw response.
-#[derive(Debug, Serialize)]
-pub struct AddressFromRawResponse {
-    /// Encoded address.
-    pub address: String,
-}
-
-/// ErgoTree to address response.
-#[derive(Debug, Serialize)]
-pub struct ErgoTreeToAddressResponse {
-    /// Encoded address.
-    pub address: String,
-}
-
 /// ErgoTree request body.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct ErgoTreeRequest {
-    /// ErgoTree bytes (hex encoded).
+    /// ErgoTree bytes (hex-encoded).
+    #[schema(example = "0008cd...")]
     #[serde(rename = "ergoTree")]
     pub ergo_tree: String,
 }
@@ -87,7 +81,16 @@ pub struct ErgoTreeRequest {
 // ==================== Handlers ====================
 
 /// GET /utils/seed
+///
 /// Generate a random seed of default size (32 bytes).
+#[utoipa::path(
+    get,
+    path = "/utils/seed",
+    tag = "utils",
+    responses(
+        (status = 200, description = "Random seed generated", body = SeedResponse)
+    )
+)]
 pub async fn get_seed() -> ApiResult<Json<SeedResponse>> {
     let seed = generate_seed(DEFAULT_SEED_SIZE);
     Ok(Json(SeedResponse {
@@ -96,7 +99,20 @@ pub async fn get_seed() -> ApiResult<Json<SeedResponse>> {
 }
 
 /// GET /utils/seed/:length
-/// Generate a random seed of specified size.
+///
+/// Generate a random seed of specified size (max 64 bytes).
+#[utoipa::path(
+    get,
+    path = "/utils/seed/{length}",
+    tag = "utils",
+    params(
+        ("length" = usize, Path, description = "Seed length in bytes (1-64)")
+    ),
+    responses(
+        (status = 200, description = "Random seed generated", body = SeedResponse),
+        (status = 400, description = "Invalid length", body = crate::error::ErrorResponse)
+    )
+)]
 pub async fn get_seed_with_length(Path(length): Path<usize>) -> ApiResult<Json<SeedResponse>> {
     if length == 0 {
         return Err(ApiError::BadRequest(
@@ -117,7 +133,18 @@ pub async fn get_seed_with_length(Path(length): Path<usize>) -> ApiResult<Json<S
 }
 
 /// POST /utils/hash/blake2b
+///
 /// Hash data using Blake2b-256.
+#[utoipa::path(
+    post,
+    path = "/utils/hash/blake2b",
+    tag = "utils",
+    request_body = HashRequest,
+    responses(
+        (status = 200, description = "Hash computed", body = HashResponse),
+        (status = 400, description = "Invalid hex data", body = crate::error::ErrorResponse)
+    )
+)]
 pub async fn hash_blake2b(Json(request): Json<HashRequest>) -> ApiResult<Json<HashResponse>> {
     let data = hex::decode(&request.data)
         .map_err(|e| ApiError::BadRequest(format!("Invalid hex data: {}", e)))?;
@@ -129,25 +156,58 @@ pub async fn hash_blake2b(Json(request): Json<HashRequest>) -> ApiResult<Json<Ha
 }
 
 /// GET /utils/address/:address
+///
 /// Validate an Ergo address.
-pub async fn validate_address(
-    Path(address): Path<String>,
-) -> ApiResult<Json<AddressValidationResponse>> {
+#[utoipa::path(
+    get,
+    path = "/utils/address/{address}",
+    tag = "utils",
+    params(
+        ("address" = String, Path, description = "Ergo address to validate")
+    ),
+    responses(
+        (status = 200, description = "Validation result", body = AddressValidation)
+    )
+)]
+pub async fn validate_address(Path(address): Path<String>) -> ApiResult<Json<AddressValidation>> {
     let validation = validate_ergo_address(&address);
     Ok(Json(validation))
 }
 
 /// POST /utils/address
-/// Validate an Ergo address (POST version).
+///
+/// Validate an Ergo address (POST version accepting JSON string).
+#[utoipa::path(
+    post,
+    path = "/utils/address",
+    tag = "utils",
+    request_body = String,
+    responses(
+        (status = 200, description = "Validation result", body = AddressValidation)
+    )
+)]
 pub async fn validate_address_post(
     Json(address): Json<String>,
-) -> ApiResult<Json<AddressValidationResponse>> {
+) -> ApiResult<Json<AddressValidation>> {
     let validation = validate_ergo_address(&address);
     Ok(Json(validation))
 }
 
 /// GET /utils/addressToRaw/:address
-/// Convert an address to raw bytes.
+///
+/// Convert an address to raw content bytes.
+#[utoipa::path(
+    get,
+    path = "/utils/addressToRaw/{address}",
+    tag = "utils",
+    params(
+        ("address" = String, Path, description = "Ergo address to convert")
+    ),
+    responses(
+        (status = 200, description = "Raw bytes", body = RawAddressResponse),
+        (status = 400, description = "Invalid address", body = crate::error::ErrorResponse)
+    )
+)]
 pub async fn address_to_raw(Path(address): Path<String>) -> ApiResult<Json<RawAddressResponse>> {
     // Decode the address to get raw bytes
     let raw_bytes = decode_address_to_raw(&address)
@@ -158,38 +218,83 @@ pub async fn address_to_raw(Path(address): Path<String>) -> ApiResult<Json<RawAd
     }))
 }
 
+/// Address response for rawToAddress and ergoTreeToAddress endpoints.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AddressResult {
+    /// Encoded Ergo address.
+    #[schema(example = "9fRAWhdxEsTcdb8PhGNrZfwqa65zfkuYHAMmkQLcic1gdLSV5vA")]
+    pub address: String,
+}
+
 /// GET /utils/rawToAddress/:raw
+///
 /// Convert raw public key bytes to an address.
-pub async fn raw_to_address(Path(raw): Path<String>) -> ApiResult<Json<AddressFromRawResponse>> {
+#[utoipa::path(
+    get,
+    path = "/utils/rawToAddress/{raw}",
+    tag = "utils",
+    params(
+        ("raw" = String, Path, description = "Raw public key bytes (hex-encoded, 33 bytes compressed)")
+    ),
+    responses(
+        (status = 200, description = "Address", body = AddressResult),
+        (status = 400, description = "Invalid raw data", body = crate::error::ErrorResponse)
+    )
+)]
+pub async fn raw_to_address(Path(raw): Path<String>) -> ApiResult<Json<AddressResult>> {
     let raw_bytes =
         hex::decode(&raw).map_err(|e| ApiError::BadRequest(format!("Invalid hex: {}", e)))?;
 
     let address = encode_raw_to_address(&raw_bytes)
         .map_err(|e| ApiError::BadRequest(format!("Invalid raw data: {}", e)))?;
 
-    Ok(Json(AddressFromRawResponse { address }))
+    Ok(Json(AddressResult { address }))
 }
 
 /// GET /utils/ergoTreeToAddress/:ergoTree
+///
 /// Convert an ErgoTree to an address.
+#[utoipa::path(
+    get,
+    path = "/utils/ergoTreeToAddress/{ergoTree}",
+    tag = "utils",
+    params(
+        ("ergoTree" = String, Path, description = "ErgoTree bytes (hex-encoded)")
+    ),
+    responses(
+        (status = 200, description = "Address", body = AddressResult),
+        (status = 400, description = "Invalid ErgoTree", body = crate::error::ErrorResponse)
+    )
+)]
 pub async fn ergo_tree_to_address(
     Path(ergo_tree_hex): Path<String>,
-) -> ApiResult<Json<ErgoTreeToAddressResponse>> {
+) -> ApiResult<Json<AddressResult>> {
     let address = convert_ergo_tree_to_address(&ergo_tree_hex)
         .map_err(|e| ApiError::BadRequest(format!("Invalid ErgoTree: {}", e)))?;
 
-    Ok(Json(ErgoTreeToAddressResponse { address }))
+    Ok(Json(AddressResult { address }))
 }
 
 /// POST /utils/ergoTreeToAddress
+///
 /// Convert an ErgoTree to an address (POST version).
+#[utoipa::path(
+    post,
+    path = "/utils/ergoTreeToAddress",
+    tag = "utils",
+    request_body = ErgoTreeRequest,
+    responses(
+        (status = 200, description = "Address", body = AddressResult),
+        (status = 400, description = "Invalid ErgoTree", body = crate::error::ErrorResponse)
+    )
+)]
 pub async fn ergo_tree_to_address_post(
     Json(request): Json<ErgoTreeRequest>,
-) -> ApiResult<Json<ErgoTreeToAddressResponse>> {
+) -> ApiResult<Json<AddressResult>> {
     let address = convert_ergo_tree_to_address(&request.ergo_tree)
         .map_err(|e| ApiError::BadRequest(format!("Invalid ErgoTree: {}", e)))?;
 
-    Ok(Json(ErgoTreeToAddressResponse { address }))
+    Ok(Json(AddressResult { address }))
 }
 
 // ==================== Helper Functions ====================
@@ -212,7 +317,7 @@ fn blake2b_256(data: &[u8]) -> [u8; 32] {
 }
 
 /// Validate an Ergo address and return validation result.
-fn validate_ergo_address(address: &str) -> AddressValidationResponse {
+fn validate_ergo_address(address: &str) -> AddressValidation {
     use ergo_lib::ergotree_ir::chain::address::{AddressEncoder, NetworkPrefix};
 
     // Try mainnet first, then testnet
@@ -222,12 +327,12 @@ fn validate_ergo_address(address: &str) -> AddressValidationResponse {
         AddressEncoder::new(NetworkPrefix::Testnet).parse_address_from_str(address);
 
     match mainnet_result.or(testnet_result) {
-        Ok(_) => AddressValidationResponse {
+        Ok(_) => AddressValidation {
             address: address.to_string(),
             is_valid: true,
             error: None,
         },
-        Err(e) => AddressValidationResponse {
+        Err(e) => AddressValidation {
             address: address.to_string(),
             is_valid: false,
             error: Some(e.to_string()),

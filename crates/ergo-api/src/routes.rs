@@ -1,15 +1,19 @@
 //! API route definitions.
 
-use crate::{handlers, AppState};
+use crate::{handlers, openapi::ApiDoc, AppState};
 use axum::{
     routing::{get, post},
     Router,
 };
 use tower_http::{compression::CompressionLayer, cors::CorsLayer, trace::TraceLayer};
+use utoipa::OpenApi;
+use utoipa_swagger_ui::SwaggerUi;
 
 /// Create the API router with all routes.
 pub fn create_router(state: AppState) -> Router {
     Router::new()
+        // OpenAPI documentation
+        .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
         // Info endpoints
         .route("/info", get(handlers::info::get_info))
         // Block endpoints

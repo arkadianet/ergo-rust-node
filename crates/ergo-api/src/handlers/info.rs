@@ -3,38 +3,59 @@
 use crate::{ApiResult, AppState, NODE_VERSION};
 use axum::{extract::State, Json};
 use serde::Serialize;
+use utoipa::ToSchema;
 
 /// Node info response.
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct NodeInfo {
     /// Node name.
+    #[schema(example = "ergo-rust-node")]
     pub name: String,
     /// App version.
+    #[schema(example = "0.1.0")]
     pub app_version: String,
-    /// Full height.
+    /// Full height (block height with full data).
+    #[schema(example = 1234567)]
     pub full_height: u32,
     /// Headers height.
+    #[schema(example = 1234567)]
     pub headers_height: u32,
-    /// Best header ID.
+    /// Best header ID (hex-encoded).
+    #[schema(example = "0000000000000000000000000000000000000000000000000000000000000000")]
     pub best_header_id: String,
-    /// Best full block ID.
+    /// Best full block ID (hex-encoded).
+    #[schema(example = "0000000000000000000000000000000000000000000000000000000000000000")]
     pub best_full_block_id: String,
-    /// State root.
+    /// State root (hex-encoded).
+    #[schema(example = "0000000000000000000000000000000000000000000000000000000000000000")]
     pub state_root: String,
-    /// Is mining.
+    /// Is mining enabled.
     pub is_mining: bool,
-    /// Peer count.
+    /// Number of connected peers.
+    #[schema(example = 10)]
     pub peer_count: usize,
-    /// Unconfirmed count.
+    /// Number of unconfirmed transactions in mempool.
+    #[schema(example = 5)]
     pub unconfirmed_count: usize,
-    /// State type.
+    /// State type (utxo or digest).
+    #[schema(example = "utxo")]
     pub state_type: String,
-    /// Is synchronized.
+    /// Is node synchronized with network.
     pub is_synced: bool,
 }
 
 /// GET /info
+///
+/// Get basic node information including sync status, peer count, and version.
+#[utoipa::path(
+    get,
+    path = "/info",
+    tag = "info",
+    responses(
+        (status = 200, description = "Node information retrieved successfully", body = NodeInfo)
+    )
+)]
 pub async fn get_info(State(state): State<AppState>) -> ApiResult<Json<NodeInfo>> {
     let (utxo_height, header_height) = state.state.heights();
 

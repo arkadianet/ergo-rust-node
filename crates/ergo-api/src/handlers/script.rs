@@ -9,61 +9,69 @@
 use crate::{ApiError, ApiResult};
 use axum::Json;
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 // ==================== Request/Response Types ====================
 
 /// Script compilation request.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct CompileRequest {
-    /// ErgoScript source code.
+    /// ErgoScript source code or hex-encoded ErgoTree.
+    #[schema(example = "0008cd...")]
     pub source: String,
     /// Optional ErgoTree version (default: 0).
     #[serde(default)]
     pub tree_version: u8,
 }
 
-/// Address response.
-#[derive(Debug, Serialize)]
-pub struct AddressResponse {
-    /// Generated address.
+/// Address response for script compilation.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct P2SAddressResponse {
+    /// Generated P2S or P2SH address.
+    #[schema(example = "2Z4YBkD...")]
     pub address: String,
 }
 
 /// Address to ErgoTree request.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct AddressToTreeRequest {
     /// Address to convert.
+    #[schema(example = "9fRAWhdxEsTcdb8PhGNrZfwqa65zfkuYHAMmkQLcic1gdLSV5vA")]
     pub address: String,
 }
 
 /// ErgoTree response.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ErgoTreeResponse {
-    /// ErgoTree bytes (hex encoded).
+    /// ErgoTree bytes (hex-encoded).
+    #[schema(example = "0008cd...")]
     pub tree: String,
 }
 
 /// Address to bytes request.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct AddressToBytesRequest {
     /// Address to convert.
+    #[schema(example = "9fRAWhdxEsTcdb8PhGNrZfwqa65zfkuYHAMmkQLcic1gdLSV5vA")]
     pub address: String,
 }
 
 /// Bytes response.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct BytesResponse {
-    /// Bytes (hex encoded).
+    /// Bytes (hex-encoded).
+    #[schema(example = "0302...")]
     pub bytes: String,
 }
 
 /// Script execution request.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ExecuteRequest {
     /// ErgoScript source code.
+    #[schema(example = "{ val x = 1; x + 1 }")]
     pub script: String,
     /// Environment variables.
     #[serde(default)]
@@ -75,40 +83,74 @@ pub struct ExecuteRequest {
 }
 
 /// Script execution result.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct ExecuteResponse {
     /// Result value.
     pub value: serde_json::Value,
     /// Execution cost.
+    #[schema(example = 1000)]
     pub cost: u64,
 }
 
 // ==================== Handlers ====================
 
 /// POST /script/p2sAddress
+///
 /// Compile ErgoScript to Pay-to-Script (P2S) address.
+#[utoipa::path(
+    post,
+    path = "/script/p2sAddress",
+    tag = "script",
+    request_body = CompileRequest,
+    responses(
+        (status = 200, description = "P2S address", body = P2SAddressResponse),
+        (status = 400, description = "Compilation failed", body = crate::error::ErrorResponse)
+    )
+)]
 pub async fn compile_to_p2s(
     Json(request): Json<CompileRequest>,
-) -> ApiResult<Json<AddressResponse>> {
+) -> ApiResult<Json<P2SAddressResponse>> {
     let address = compile_script_to_p2s(&request.source)
         .map_err(|e| ApiError::BadRequest(format!("Compilation failed: {}", e)))?;
 
-    Ok(Json(AddressResponse { address }))
+    Ok(Json(P2SAddressResponse { address }))
 }
 
 /// POST /script/p2shAddress
+///
 /// Compile ErgoScript to Pay-to-Script-Hash (P2SH) address.
+#[utoipa::path(
+    post,
+    path = "/script/p2shAddress",
+    tag = "script",
+    request_body = CompileRequest,
+    responses(
+        (status = 200, description = "P2SH address", body = P2SAddressResponse),
+        (status = 400, description = "Compilation failed", body = crate::error::ErrorResponse)
+    )
+)]
 pub async fn compile_to_p2sh(
     Json(request): Json<CompileRequest>,
-) -> ApiResult<Json<AddressResponse>> {
+) -> ApiResult<Json<P2SAddressResponse>> {
     let address = compile_script_to_p2sh(&request.source)
         .map_err(|e| ApiError::BadRequest(format!("Compilation failed: {}", e)))?;
 
-    Ok(Json(AddressResponse { address }))
+    Ok(Json(P2SAddressResponse { address }))
 }
 
 /// POST /script/addressToTree
+///
 /// Convert an address to its ErgoTree representation.
+#[utoipa::path(
+    post,
+    path = "/script/addressToTree",
+    tag = "script",
+    request_body = AddressToTreeRequest,
+    responses(
+        (status = 200, description = "ErgoTree", body = ErgoTreeResponse),
+        (status = 400, description = "Invalid address", body = crate::error::ErrorResponse)
+    )
+)]
 pub async fn address_to_tree(
     Json(request): Json<AddressToTreeRequest>,
 ) -> ApiResult<Json<ErgoTreeResponse>> {
@@ -119,7 +161,18 @@ pub async fn address_to_tree(
 }
 
 /// POST /script/addressToBytes
+///
 /// Convert an address to raw bytes.
+#[utoipa::path(
+    post,
+    path = "/script/addressToBytes",
+    tag = "script",
+    request_body = AddressToBytesRequest,
+    responses(
+        (status = 200, description = "Raw bytes", body = BytesResponse),
+        (status = 400, description = "Invalid address", body = crate::error::ErrorResponse)
+    )
+)]
 pub async fn address_to_bytes(
     Json(request): Json<AddressToBytesRequest>,
 ) -> ApiResult<Json<BytesResponse>> {
@@ -130,7 +183,18 @@ pub async fn address_to_bytes(
 }
 
 /// POST /script/executeWithContext
-/// Execute a script with the given context.
+///
+/// Execute a script with the given context. (Not yet implemented)
+#[utoipa::path(
+    post,
+    path = "/script/executeWithContext",
+    tag = "script",
+    request_body = ExecuteRequest,
+    responses(
+        (status = 200, description = "Execution result", body = ExecuteResponse),
+        (status = 501, description = "Not implemented", body = crate::error::ErrorResponse)
+    )
+)]
 pub async fn execute_with_context(
     Json(_request): Json<ExecuteRequest>,
 ) -> ApiResult<Json<ExecuteResponse>> {

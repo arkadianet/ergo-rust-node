@@ -38,6 +38,10 @@ thiserror.workspace = true
 # Logging
 tracing.workspace = true
 
+# OpenAPI documentation
+utoipa.workspace = true
+utoipa-swagger-ui.workspace = true
+
 # Utilities
 hex.workspace = true
 blake2.workspace = true

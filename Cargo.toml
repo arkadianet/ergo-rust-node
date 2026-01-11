@@ -85,6 +85,10 @@ clap = { version = "4", features = ["derive"] }
 toml = "0.8"
 config = "0.14"
 
+# OpenAPI documentation
+utoipa = { version = "5", features = ["axum_extras"] }
+utoipa-swagger-ui = { version = "8", features = ["axum"] }
+
 # Utilities
 bytes = "1"
 hex = "0.4"
