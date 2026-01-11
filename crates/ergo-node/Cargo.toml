@@ -21,6 +21,9 @@ ergo-api.workspace = true
 ergo-mining.workspace = true
 ergo-wallet.workspace = true
 
+# sigma-rust crates
+ergo-lib.workspace = true
+
 # Async
 tokio.workspace = true
 futures.workspace = true

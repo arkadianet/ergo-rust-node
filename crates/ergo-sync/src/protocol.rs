@@ -69,6 +69,13 @@ pub enum SyncCommand {
         block_id: Vec<u8>,
         block_data: Vec<u8>,
     },
+    /// Add a transaction to the mempool.
+    AddTransaction {
+        tx_id: Vec<u8>,
+        tx_data: Vec<u8>,
+        /// Peer that sent this transaction (for rebroadcast exclusion).
+        from_peer: PeerId,
+    },
 }
 
 /// Events that the sync service receives.
@@ -214,6 +221,9 @@ pub struct SyncProtocol {
     in_flight_headers: RwLock<HashMap<Vec<u8>, std::time::Instant>>,
     /// Header request timeout duration.
     header_timeout: std::time::Duration,
+    /// Transaction IDs we've already processed (to avoid re-requesting).
+    /// Uses LRU cache to automatically evict oldest entries when capacity is exceeded.
+    known_transactions: parking_lot::Mutex<lru::LruCache<Vec<u8>, ()>>,
 }
 
 /// Per-peer sync state.
@@ -295,6 +305,10 @@ impl SyncProtocol {
             pending_header_inv: RwLock::new(VecDeque::new()),
             in_flight_headers: RwLock::new(HashMap::new()),
             header_timeout: std::time::Duration::from_secs(10),
+            // LRU cache for known transaction IDs - automatically evicts oldest entries
+            known_transactions: parking_lot::Mutex::new(lru::LruCache::new(
+                std::num::NonZeroUsize::new(10_000).unwrap(),
+            )),
         }
     }
 
@@ -599,8 +613,17 @@ impl SyncProtocol {
         // Scala node uses desiredInvObjects = 400, so we can request up to 400 at once
         const MAX_REQUEST_SIZE: usize = 400;
 
-        // Only handle header Inv specially (type_id 101)
+        // Identify the modifier type
         let is_header_inv = inv.type_id == ModifierType::Header.to_byte();
+        let is_transaction_inv = inv.type_id == ModifierType::Transaction.to_byte();
+
+        if is_transaction_inv {
+            info!(
+                peer = %peer,
+                count = inv.ids.len(),
+                "Received transaction Inv announcement"
+            );
+        }
 
         if !inv.ids.is_empty() {
             // Log first few IDs for debugging
@@ -608,37 +631,56 @@ impl SyncProtocol {
                 debug!(index = i, id = %hex::encode(id), "Inv item");
             }
 
-            // Filter out already-stored headers
+            // Filter out already-known modifiers (headers or transactions)
             let original_count = inv.ids.len();
-            let (filtered_ids, removed_ids): (Vec<Vec<u8>>, Vec<Vec<u8>>) = {
+            let (filtered_ids, removed_count): (Vec<Vec<u8>>, usize) = if is_header_inv {
+                // Filter out already-stored headers
                 let stored = self.stored_headers.read();
                 let mut filtered = Vec::new();
-                let mut removed = Vec::new();
+                let mut removed = 0;
                 for id in inv.ids {
                     if stored.contains(&id) {
-                        removed.push(id);
+                        removed += 1;
                     } else {
                         filtered.push(id);
                     }
                 }
                 (filtered, removed)
+            } else if is_transaction_inv {
+                // Filter out already-known transactions using LRU cache
+                let known = self.known_transactions.lock();
+                let known_count = known.len();
+                let mut filtered = Vec::new();
+                let mut removed = 0;
+                for id in inv.ids {
+                    if known.contains(&id) {
+                        removed += 1;
+                    } else {
+                        filtered.push(id);
+                    }
+                }
+                drop(known); // Release lock before logging
+                debug!(
+                    original = original_count,
+                    filtered = filtered.len(),
+                    removed = removed,
+                    known_tx_cache_size = known_count,
+                    "Transaction Inv filtering result"
+                );
+                (filtered, removed)
+            } else {
+                // For other types, don't filter
+                (inv.ids, 0)
             };
 
-            // Log removed IDs for debugging (only at debug level to avoid spam)
-            for removed_id in &removed_ids {
-                debug!(
-                    removed_id = %hex::encode(removed_id),
-                    "Filtered out header ID (already stored)"
-                );
-            }
-
             // Only log summary at info level if we actually filtered something
-            if removed_ids.len() > 0 {
+            if removed_count > 0 {
                 debug!(
                     original = original_count,
                     filtered = filtered_ids.len(),
-                    removed = removed_ids.len(),
-                    "Filtered Inv IDs"
+                    removed = removed_count,
+                    type_id = inv.type_id,
+                    "Filtered Inv IDs (already known)"
                 );
             }
 
@@ -718,6 +760,14 @@ impl SyncProtocol {
         }
 
         match ModifierType::from_byte(type_id) {
+            Some(ModifierType::Transaction) => {
+                info!(
+                    tx_id = hex::encode(&id),
+                    size = data.len(),
+                    "Dispatching to on_transaction_received"
+                );
+                self.on_transaction_received(peer, id, data).await?;
+            }
             Some(ModifierType::Header) => {
                 self.on_header_received(&peer, id, data).await?;
             }
@@ -1131,6 +1181,40 @@ impl SyncProtocol {
             let mut chain = self.header_chain.write();
             chain.tx_id_to_header_id.remove(&id);
         }
+
+        Ok(())
+    }
+
+    /// Handle received transaction.
+    async fn on_transaction_received(
+        &self,
+        peer: PeerId,
+        id: Vec<u8>,
+        data: Vec<u8>,
+    ) -> SyncResult<()> {
+        debug!(
+            peer = %peer,
+            tx_id = hex::encode(&id),
+            size = data.len(),
+            "Received unconfirmed transaction"
+        );
+
+        // Mark as known to avoid re-requesting.
+        // LRU cache automatically evicts oldest entries when capacity is exceeded.
+        self.known_transactions.lock().put(id.clone(), ());
+
+        // Forward to the node for mempool insertion and validation.
+        // The node will validate the transaction (check inputs exist, verify scripts,
+        // check conservation rules) before adding to mempool.
+        let cmd = SyncCommand::AddTransaction {
+            tx_id: id,
+            tx_data: data,
+            from_peer: peer,
+        };
+
+        self.command_tx.send(cmd).await.map_err(|e| {
+            SyncError::Internal(format!("Failed to send AddTransaction command: {}", e))
+        })?;
 
         Ok(())
     }

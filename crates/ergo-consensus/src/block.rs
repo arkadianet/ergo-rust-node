@@ -467,6 +467,8 @@ impl ADProofs {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum ModifierType {
+    /// Unconfirmed transaction (mempool).
+    Transaction = 2,
     /// Block header.
     Header = 101,
     /// Block transactions.
@@ -483,6 +485,7 @@ impl ModifierType {
     /// Create from byte value.
     pub fn from_byte(b: u8) -> Option<Self> {
         match b {
+            2 => Some(Self::Transaction),
             101 => Some(Self::Header),
             102 => Some(Self::BlockTransactions),
             108 => Some(Self::Extension),
@@ -575,8 +578,160 @@ mod tests {
             ModifierType::from_byte(102),
             Some(ModifierType::BlockTransactions)
         );
+        assert_eq!(ModifierType::from_byte(2), Some(ModifierType::Transaction));
         assert_eq!(ModifierType::from_byte(255), None);
 
         assert_eq!(ModifierType::Header.to_byte(), 101);
+        assert_eq!(ModifierType::Transaction.to_byte(), 2);
+    }
+
+    /// Test vectors from Scala node's ErgoTransactionSpec.scala
+    /// These ensure byte-for-byte serialization compatibility with the Scala node.
+    ///
+    /// Source: ergo/ergo-core/src/test/scala/org/ergoplatform/modifiers/mempool/ErgoTransactionSpec.scala
+    mod scala_serialization_compat {
+        use ergo_lib::chain::transaction::Transaction;
+        use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
+
+        fn hex_to_bytes(hex: &str) -> Vec<u8> {
+            (0..hex.len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+                .collect()
+        }
+
+        /// Simple transfer transaction with 2 inputs and 2 outputs.
+        /// From Scala test: "serialization vector" property test, first transaction.
+        #[test]
+        fn test_simple_transfer_tx() {
+            // Transaction bytes from Scala ErgoTransactionSpec
+            let bytes_str = "02c95c2ccf55e03cac6659f71ca4df832d28e2375569cec178dcb17f3e2e5f774238b4a04b4201da0578be3dac11067b567a73831f35b024a2e623c1f8da230407f63bab62c62ed9b93808b106b5a7e8b1751fa656f4c5de467400ca796a4fc9c0d746a69702a77bd78b1a80a5ef5bf5713bbd95d93a4f23b27ead385aea4d78a234c35accacdf8996b0af5b51e26fee29ea5c05468f23707d31c0df39400127391cd57a70eb856710db48bb9833606e0bf90340000000028094ebdc030008cd0326df75ea615c18acc6bb4b517ac82795872f388d5d180aac90eaa84de750b942e8070000c0843d1005040004000e36100204cf0f08cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ea02d192a39a8cc7a701730073011001020402d19683030193a38cc7b2a57300000193c2b2a57301007473027303830108cdeeac93b1a57304e8070000";
+            let expected_tx_id = "b59ca51f7470f291acc32e84870d00c4fda8b773f38f757f3d65d45265c13da5";
+
+            let bytes = hex_to_bytes(bytes_str);
+            let tx = Transaction::sigma_parse_bytes(&bytes).expect("Failed to parse transaction");
+
+            // Verify transaction ID matches Scala
+            let tx_id_hex = hex::encode(tx.id().0);
+            assert_eq!(
+                tx_id_hex, expected_tx_id,
+                "Transaction ID mismatch - serialization incompatible with Scala node"
+            );
+
+            // Verify we have expected structure
+            assert_eq!(tx.inputs.len(), 2, "Expected 2 inputs");
+            assert_eq!(tx.outputs.len(), 2, "Expected 2 outputs");
+            assert!(tx.data_inputs.is_none(), "Expected 0 data inputs");
+
+            // Verify first input box ID
+            let first_input_id = hex::encode(tx.inputs.first().box_id.as_ref());
+            assert_eq!(
+                first_input_id,
+                "c95c2ccf55e03cac6659f71ca4df832d28e2375569cec178dcb17f3e2e5f7742"
+            );
+
+            // Verify re-serialization produces identical bytes
+            let reserialized = tx.sigma_serialize_bytes().expect("Failed to serialize");
+            assert_eq!(
+                reserialized, bytes,
+                "Re-serialization produced different bytes - incompatible with Scala node"
+            );
+        }
+
+        /// Transaction with registers in outputs (R4-R8).
+        /// From Scala test: tx2 in "serialization vector" property.
+        #[test]
+        fn test_tx_with_registers() {
+            let bytes_str = "02c95c2ccf55e03cac6659f71ca4df832d28e2375569cec178dcb17f3e2e5f774238b4a04b4201da0578be3dac11067b567a73831f35b024a2e623c1f8da230407f63bab62c62ed9b93808b106b5a7e8b1751fa656f4c5de467400ca796a4fc9c0d746a69702a77bd78b1a80a5ef5bf5713bbd95d93a4f23b27ead385aea4d78a234c35accacdf8996b0af5b51e26fee29ea5c05468f23707d31c0df39400127391cd57a70eb856710db48bb9833606e0bf90340000000028094ebdc030008cd0326df75ea615c18acc6bb4b517ac82795872f388d5d180aac90eaa84de750b942e8070005020108cd0326df75ea615c18acc6bb4b517ac82795872f388d5d180aac90eaa84de750b94204141103020496d396010e211234561234561234561234561234561234561234561234561234561234561234568094ebdc030008cd0326df75ea615c18acc6bb4b517ac82795872f388d5d180aac90eaa84de750b942e8070000";
+            let expected_tx_id = "bd04a93f67fda77d89afc38cd8237f142ad5a349405929fd1f7b7f24c4ea2e80";
+
+            let bytes = hex_to_bytes(bytes_str);
+            let tx = Transaction::sigma_parse_bytes(&bytes).expect("Failed to parse transaction");
+
+            let tx_id_hex = hex::encode(tx.id().0);
+            assert_eq!(
+                tx_id_hex, expected_tx_id,
+                "Transaction ID mismatch for tx with registers"
+            );
+
+            // Verify structure
+            assert_eq!(tx.inputs.len(), 2);
+            assert_eq!(tx.outputs.len(), 2);
+
+            // Verify re-serialization
+            let reserialized = tx.sigma_serialize_bytes().expect("Failed to serialize");
+            assert_eq!(
+                reserialized, bytes,
+                "Re-serialization mismatch for tx with registers"
+            );
+        }
+
+        /// Transaction with data inputs and tokens.
+        /// From Scala test: third check() call in "serialization vector" property.
+        #[test]
+        fn test_tx_with_data_inputs_and_tokens() {
+            let bytes_str = "02e76bf387ab2e63ba8f4e23267bc88265b5fee4950030199e2e2c214334251c6400002e9798d7eb0cd867f6dc29872f80de64c04cef10a99a58d007ef7855f0acbdb9000001f97d1dc4626de22db836270fe1aa004b99970791e4557de8f486f6d433b81195026df03fffc9042bf0edb0d0d36d7a675239b83a9080d39716b9aa0a64cccb9963e76bf387ab2e63ba8f4e23267bc88265b5fee4950030199e2e2c214334251c6403da92a8b8e3ad770008cd02db0ce4d301d6dc0b7a5fbe749588ef4ef68f2c94435020a3c31764ffd36a2176000200daa4eb6b01aec8d1ff0100da92a8b8e3ad770008cd02db0ce4d301d6dc0b7a5fbe749588ef4ef68f2c94435020a3c31764ffd36a2176000200daa4eb6b01aec8d1ff0100fa979af8988ce7010008cd02db0ce4d301d6dc0b7a5fbe749588ef4ef68f2c94435020a3c31764ffd36a2176000000";
+            let expected_tx_id = "663ae91ab7145a4f42b5509e1a2fb0469b7cb46ea87fdfd90e0b4c8ef29c2493";
+
+            let bytes = hex_to_bytes(bytes_str);
+            let tx = Transaction::sigma_parse_bytes(&bytes).expect("Failed to parse transaction");
+
+            let tx_id_hex = hex::encode(tx.id().0);
+            assert_eq!(
+                tx_id_hex, expected_tx_id,
+                "Transaction ID mismatch for tx with data inputs and tokens"
+            );
+
+            // Verify structure
+            assert_eq!(tx.inputs.len(), 2, "Expected 2 inputs");
+            assert_eq!(tx.outputs.len(), 3, "Expected 3 outputs");
+            let data_inputs = tx.data_inputs.as_ref().expect("Expected data inputs");
+            assert_eq!(data_inputs.len(), 1, "Expected 1 data input");
+
+            // Verify data input box ID
+            let data_input_id = hex::encode(data_inputs.first().box_id.as_ref());
+            assert_eq!(
+                data_input_id,
+                "f97d1dc4626de22db836270fe1aa004b99970791e4557de8f486f6d433b81195"
+            );
+
+            // Verify first output has tokens
+            let first_output_tokens = tx.outputs.first().tokens.as_ref();
+            assert_eq!(
+                first_output_tokens.map(|t| t.len()).unwrap_or(0),
+                2,
+                "First output should have 2 tokens"
+            );
+
+            // Verify re-serialization
+            let reserialized = tx.sigma_serialize_bytes().expect("Failed to serialize");
+            assert_eq!(
+                reserialized, bytes,
+                "Re-serialization mismatch for tx with data inputs and tokens"
+            );
+        }
+
+        /// Test that messageToSign (bytes_to_sign) matches Scala.
+        /// This is critical for transaction signing compatibility.
+        #[test]
+        fn test_message_to_sign() {
+            // Simple transfer tx - bytesToSign from Scala test
+            let bytes_to_sign_str = "02c95c2ccf55e03cac6659f71ca4df832d28e2375569cec178dcb17f3e2e5f77420000ca796a4fc9c0d746a69702a77bd78b1a80a5ef5bf5713bbd95d93a4f23b27ead00000000028094ebdc030008cd0326df75ea615c18acc6bb4b517ac82795872f388d5d180aac90eaa84de750b942e8070000c0843d1005040004000e36100204cf0f08cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ea02d192a39a8cc7a701730073011001020402d19683030193a38cc7b2a57300000193c2b2a57301007473027303830108cdeeac93b1a57304e8070000";
+
+            // Full tx bytes (with proofs)
+            let full_tx_bytes_str = "02c95c2ccf55e03cac6659f71ca4df832d28e2375569cec178dcb17f3e2e5f774238b4a04b4201da0578be3dac11067b567a73831f35b024a2e623c1f8da230407f63bab62c62ed9b93808b106b5a7e8b1751fa656f4c5de467400ca796a4fc9c0d746a69702a77bd78b1a80a5ef5bf5713bbd95d93a4f23b27ead385aea4d78a234c35accacdf8996b0af5b51e26fee29ea5c05468f23707d31c0df39400127391cd57a70eb856710db48bb9833606e0bf90340000000028094ebdc030008cd0326df75ea615c18acc6bb4b517ac82795872f388d5d180aac90eaa84de750b942e8070000c0843d1005040004000e36100204cf0f08cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ea02d192a39a8cc7a701730073011001020402d19683030193a38cc7b2a57300000193c2b2a57301007473027303830108cdeeac93b1a57304e8070000";
+
+            let full_bytes = hex_to_bytes(full_tx_bytes_str);
+            let tx = Transaction::sigma_parse_bytes(&full_bytes).expect("Failed to parse tx");
+
+            // Get bytes to sign from ergo-lib
+            let bytes_to_sign = tx.bytes_to_sign().expect("Failed to get bytes to sign");
+            let actual_bytes_to_sign_hex = hex::encode(&bytes_to_sign);
+
+            assert_eq!(
+                actual_bytes_to_sign_hex, bytes_to_sign_str,
+                "bytes_to_sign mismatch - transaction signing would be incompatible"
+            );
+        }
     }
 }

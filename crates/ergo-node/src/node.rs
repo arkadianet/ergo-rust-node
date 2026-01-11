@@ -2,6 +2,19 @@
 
 use crate::config::NodeConfig;
 use anyhow::Result;
+use std::sync::OnceLock;
+
+/// Cached miner fee ErgoTree bytes for fee calculation.
+/// In Ergo, transaction fees are explicit outputs to this special fee proposition.
+static MINER_FEE_ERGO_TREE_BYTES: OnceLock<Vec<u8>> = OnceLock::new();
+
+/// Get the miner fee ErgoTree bytes, initializing on first call.
+fn get_miner_fee_bytes() -> &'static Vec<u8> {
+    MINER_FEE_ERGO_TREE_BYTES.get_or_init(|| {
+        use ergo_lib::wallet::miner_fee::MINERS_FEE_BASE16_BYTES;
+        hex::decode(MINERS_FEE_BASE16_BYTES).expect("MINERS_FEE_BASE16_BYTES is valid hex constant")
+    })
+}
 use ergo_api::AppState;
 use ergo_consensus::block::{
     genesis_parent_header, BlockId, BlockTransactions, BoxId, Digest32, ErgoBox, Extension,
@@ -1067,6 +1080,173 @@ impl Node {
                                     }
                                 }
                             }
+                            SyncCommand::AddTransaction { tx_id, tx_data, from_peer } => {
+                                use ergo_lib::chain::transaction::Transaction;
+                                use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
+                                use ergo_consensus::tx_validation::{
+                                    validate_data_inputs_exist,
+                                    validate_erg_conservation, validate_token_conservation,
+                                };
+                                use ergo_mempool::PooledTransaction;
+                                use std::time::{SystemTime, UNIX_EPOCH};
+
+                                // Parse the transaction
+                                let tx = match Transaction::sigma_parse_bytes(&tx_data) {
+                                    Ok(tx) => tx,
+                                    Err(e) => {
+                                        debug!(
+                                            tx_id = %hex::encode(&tx_id),
+                                            error = %e,
+                                            "Failed to parse transaction"
+                                        );
+                                        continue;
+                                    }
+                                };
+
+                                // Validate inputs exist in UTXO state and collect input boxes
+                                let mut input_boxes = Vec::with_capacity(tx.inputs.len());
+                                let mut validation_failed = false;
+
+                                for input in tx.inputs.iter() {
+                                    let box_id = input.box_id.as_ref();
+                                    match state_for_router.utxo.get_box_by_bytes(box_id) {
+                                        Ok(Some(entry)) => {
+                                            input_boxes.push(entry.ergo_box);
+                                        }
+                                        Ok(None) => {
+                                            // Input not in UTXO - might be spent by another mempool tx
+                                            // or the transaction is invalid
+                                            debug!(
+                                                tx_id = %hex::encode(&tx_id),
+                                                box_id = %hex::encode(box_id),
+                                                "Input box not found in UTXO"
+                                            );
+                                            validation_failed = true;
+                                            break;
+                                        }
+                                        Err(e) => {
+                                            debug!(
+                                                tx_id = %hex::encode(&tx_id),
+                                                error = %e,
+                                                "Error looking up input box"
+                                            );
+                                            validation_failed = true;
+                                            break;
+                                        }
+                                    }
+                                }
+
+                                if validation_failed {
+                                    continue;
+                                }
+
+                                // Create lookup closure for data inputs validation
+                                let utxo_lookup = |box_id: &[u8]| -> Option<ErgoBox> {
+                                    state_for_router.utxo.get_box_by_bytes(box_id)
+                                        .ok()
+                                        .flatten()
+                                        .map(|entry| entry.ergo_box)
+                                };
+
+                                // Validate data inputs exist
+                                if let Err(e) = validate_data_inputs_exist(&tx, &utxo_lookup) {
+                                    debug!(
+                                        tx_id = %hex::encode(&tx_id),
+                                        error = %e,
+                                        "Data input validation failed"
+                                    );
+                                    continue;
+                                }
+
+                                // Validate ERG conservation (inputs >= outputs)
+                                if let Err(e) = validate_erg_conservation(&tx, &input_boxes) {
+                                    debug!(
+                                        tx_id = %hex::encode(&tx_id),
+                                        error = %e,
+                                        "ERG conservation check failed"
+                                    );
+                                    continue;
+                                }
+
+                                // Calculate fee by summing outputs that pay to the miner fee contract.
+                                // In Ergo, fee is an explicit output to a special fee proposition,
+                                // NOT the difference between inputs and outputs.
+                                let fee_ergo_tree_bytes = get_miner_fee_bytes();
+
+                                let fee: u64 = tx.outputs.iter()
+                                    .filter(|out| {
+                                        out.ergo_tree.sigma_serialize_bytes()
+                                            .map(|bytes| bytes == *fee_ergo_tree_bytes)
+                                            .unwrap_or(false)
+                                    })
+                                    .map(|out| u64::from(out.value))
+                                    .sum();
+
+                                // Validate token conservation
+                                if let Err(e) = validate_token_conservation(&tx, &input_boxes, false) {
+                                    debug!(
+                                        tx_id = %hex::encode(&tx_id),
+                                        error = %e,
+                                        "Token conservation check failed"
+                                    );
+                                    continue;
+                                }
+
+                                // Create PooledTransaction
+                                let inputs: Vec<Vec<u8>> = tx.inputs.iter()
+                                    .map(|i| i.box_id.as_ref().to_vec())
+                                    .collect();
+                                let outputs: Vec<Vec<u8>> = tx.outputs.iter()
+                                    .map(|o| o.box_id().as_ref().to_vec())
+                                    .collect();
+
+                                let arrival_time = SystemTime::now()
+                                    .duration_since(UNIX_EPOCH)
+                                    .unwrap()
+                                    .as_millis() as u64;
+
+                                let pooled_tx = PooledTransaction {
+                                    id: tx_id.clone(),
+                                    bytes: tx_data.clone(),
+                                    fee,
+                                    inputs: inputs.clone(),
+                                    outputs: outputs.clone(),
+                                    arrival_time,
+                                    estimated_cost: None,
+                                };
+
+                                // Add to mempool
+                                match mempool.add(pooled_tx) {
+                                    Ok(()) => {
+                                        debug!(
+                                            tx_id = %hex::encode(&tx_id),
+                                            fee,
+                                            from = %from_peer,
+                                            "Transaction added to mempool"
+                                        );
+
+                                        // Broadcast to other peers (excluding sender)
+                                        let inv = ergo_network::InvData {
+                                            type_id: ergo_consensus::block::ModifierType::Transaction.to_byte(),
+                                            ids: vec![tx_id],
+                                        };
+                                        // Note: We broadcast to all peers; the sender will
+                                        // filter it out as already known
+                                        let _ = network_cmd_tx_for_router
+                                            .send(NetworkCommand::Broadcast {
+                                                message: Message::Inv(inv),
+                                            })
+                                            .await;
+                                    }
+                                    Err(e) => {
+                                        debug!(
+                                            tx_id = %hex::encode(&tx_id),
+                                            error = %e,
+                                            "Failed to add transaction to mempool"
+                                        );
+                                    }
+                                }
+                            }
                         }
                     }
                     else => break,
@@ -1116,7 +1296,12 @@ impl Node {
                 }
             }
             Message::Modifier(modifier) => {
-                debug!(peer = %peer_id, type_id = modifier.type_id, count = modifier.modifiers.len(), "Modifier received");
+                // Log at info level for transactions to help debug mempool population
+                if modifier.type_id == 2 {
+                    info!(peer = %peer_id, type_id = modifier.type_id, count = modifier.modifiers.len(), "Transaction Modifier received");
+                } else {
+                    debug!(peer = %peer_id, type_id = modifier.type_id, count = modifier.modifiers.len(), "Modifier received");
+                }
                 // Send an event for each modifier in the batch
                 // Use try_send to avoid deadlock
                 for item in modifier.modifiers {

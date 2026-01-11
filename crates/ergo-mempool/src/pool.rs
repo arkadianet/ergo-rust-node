@@ -37,7 +37,9 @@ impl Default for MempoolConfig {
             max_size: DEFAULT_MAX_SIZE,
             max_transactions: DEFAULT_MAX_TXS,
             tx_expiry_secs: DEFAULT_TX_EXPIRY_SECS,
-            min_fee_per_byte: 0.001, // 0.001 nanoERG per byte
+            // Accept all transactions regardless of fee (like Scala node with minimalFeeAmount=0)
+            // Mining nodes can filter by fee when selecting transactions for blocks
+            min_fee_per_byte: 0.0,
         }
     }
 }
