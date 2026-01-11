@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ergo Node Panel</title>
+    <link rel="stylesheet" href="/panel/style.css">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>E</text></svg>">
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <header class="header">
+            <div class="logo">
+                <svg class="logo-icon" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <rect width="32" height="32" rx="6" fill="#e94560"/>
+                    <path d="M8 8h16v4H12v4h10v4H12v4h12v4H8V8z" fill="white"/>
+                </svg>
+                <h1>Ergo Node</h1>
+            </div>
+            <div class="header-info">
+                <span class="version" id="version"></span>
+                <span class="node-name" id="node-name"></span>
+            </div>
+        </header>
+
+        <!-- Connection Status Banner -->
+        <div class="connection-banner" id="connection-banner">
+            <span class="connection-dot"></span>
+            <span id="connection-text">Connecting...</span>
+        </div>
+
+        <!-- Sync Status Section -->
+        <section class="card sync-section">
+            <div class="sync-header">
+                <div class="sync-status">
+                    <div class="status-indicator" id="status-indicator"></div>
+                    <span class="sync-label" id="sync-label">Initializing...</span>
+                </div>
+                <div class="mining-badge" id="mining-badge" style="display: none;">
+                    <span class="mining-dot"></span>
+                    Mining
+                </div>
+            </div>
+
+            <!-- Progress bars -->
+            <div class="progress-container">
+                <div class="progress-row">
+                    <label>Headers</label>
+                    <div class="progress-bar">
+                        <div class="progress-fill headers" id="headers-progress"></div>
+                    </div>
+                    <span class="progress-count" id="headers-count">0</span>
+                </div>
+                <div class="progress-row">
+                    <label>Blocks</label>
+                    <div class="progress-bar">
+                        <div class="progress-fill blocks" id="blocks-progress"></div>
+                    </div>
+                    <span class="progress-count" id="blocks-count">0</span>
+                </div>
+            </div>
+
+            <!-- Stats Grid -->
+            <div class="stats-grid">
+                <div class="stat-card">
+                    <div class="stat-icon peers-icon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <circle cx="12" cy="7" r="4"/>
+                            <path d="M5.5 21a6.5 6.5 0 0 1 13 0"/>
+                            <circle cx="19" cy="11" r="2.5"/>
+                            <path d="M22 19a4 4 0 0 0-6 0"/>
+                            <circle cx="5" cy="11" r="2.5"/>
+                            <path d="M8 19a4 4 0 0 0-6 0"/>
+                        </svg>
+                    </div>
+                    <div class="stat-content">
+                        <div class="stat-value" id="peer-count">0</div>
+                        <div class="stat-label">Peers</div>
+                    </div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-icon mempool-icon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <rect x="3" y="3" width="18" height="18" rx="2"/>
+                            <path d="M3 9h18M9 3v18"/>
+                        </svg>
+                    </div>
+                    <div class="stat-content">
+                        <div class="stat-value" id="mempool-count">0</div>
+                        <div class="stat-label">Mempool TXs</div>
+                    </div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-icon size-icon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
+                            <polyline points="3.27,6.96 12,12.01 20.73,6.96"/>
+                            <line x1="12" y1="22.08" x2="12" y2="12"/>
+                        </svg>
+                    </div>
+                    <div class="stat-content">
+                        <div class="stat-value" id="mempool-size">0 B</div>
+                        <div class="stat-label">Mempool Size</div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Mempool Visualization (shown when synced) -->
+        <section class="card mempool-section" id="mempool-section">
+            <div class="section-header">
+                <h2>Mempool Transactions</h2>
+                <div class="mempool-legend">
+                    <span class="legend-item"><span class="legend-color low-fee"></span>Low Fee</span>
+                    <span class="legend-item"><span class="legend-color med-fee"></span>Medium</span>
+                    <span class="legend-item"><span class="legend-color high-fee"></span>High Fee</span>
+                </div>
+            </div>
+            <div class="canvas-container">
+                <canvas id="mempool-canvas"></canvas>
+                <div class="empty-mempool" id="empty-mempool">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                        <path d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"/>
+                    </svg>
+                    <p>Mempool is empty</p>
+                    <span>Waiting for transactions...</span>
+                </div>
+            </div>
+        </section>
+
+        <!-- Footer -->
+        <footer class="footer">
+            <span>Ergo Rust Node</span>
+            <a href="/swagger-ui" target="_blank">API Docs</a>
+        </footer>
+    </div>
+
+    <script src="/panel/app.js"></script>
+</body>
+</html>

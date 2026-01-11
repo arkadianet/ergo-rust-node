@@ -14,6 +14,11 @@ pub fn create_router(state: AppState) -> Router {
     Router::new()
         // OpenAPI documentation
         .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
+        // Panel UI (dashboard)
+        .route("/panel", get(handlers::panel::panel_index))
+        .route("/panel/", get(handlers::panel::panel_index))
+        .route("/panel/ws", get(handlers::panel::panel_websocket))
+        .route("/panel/*path", get(handlers::panel::panel_assets))
         // Info endpoints
         .route("/info", get(handlers::info::get_info))
         // Block endpoints

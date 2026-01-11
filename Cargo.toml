@@ -56,7 +56,7 @@ rocksdb = "0.24"
 tower = { version = "0.4", features = ["full"] }
 
 # API
-axum = { version = "0.7", features = ["macros"] }
+axum = { version = "0.7", features = ["macros", "ws"] }
 tower-http = { version = "0.5", features = ["cors", "trace", "compression-gzip"] }
 
 # Serialization

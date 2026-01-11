@@ -1,0 +1,523 @@
+/* Ergo Node Panel - Dark Theme */
+
+:root {
+    --bg-dark: #0f0f1a;
+    --bg-card: #1a1a2e;
+    --bg-card-hover: #1f1f35;
+    --accent-primary: #e94560;
+    --accent-secondary: #0f3460;
+    --accent-tertiary: #16213e;
+    --text-primary: #f1f1f1;
+    --text-secondary: #a0a0b0;
+    --text-muted: #6a6a7a;
+    --success: #4ade80;
+    --success-dim: #22c55e;
+    --warning: #fbbf24;
+    --syncing: #60a5fa;
+    --error: #f87171;
+    --low-fee: #3b82f6;
+    --med-fee: #eab308;
+    --high-fee: #ef4444;
+    --border: rgba(255, 255, 255, 0.08);
+    --shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+    --radius: 12px;
+    --radius-sm: 8px;
+}
+
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+    background: var(--bg-dark);
+    color: var(--text-primary);
+    min-height: 100vh;
+    line-height: 1.5;
+}
+
+.container {
+    max-width: 900px;
+    margin: 0 auto;
+    padding: 1.5rem;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+}
+
+/* Header */
+.header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 1rem;
+    padding-bottom: 1rem;
+    border-bottom: 1px solid var(--border);
+}
+
+.logo {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.logo-icon {
+    width: 36px;
+    height: 36px;
+}
+
+.header h1 {
+    font-size: 1.25rem;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.header-info {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+}
+
+.version {
+    background: var(--accent-tertiary);
+    padding: 0.25rem 0.5rem;
+    border-radius: 4px;
+    font-family: monospace;
+}
+
+.node-name {
+    color: var(--text-muted);
+}
+
+/* Connection Banner */
+.connection-banner {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    padding: 0.5rem 1rem;
+    margin-bottom: 1rem;
+    background: var(--accent-tertiary);
+    border-radius: var(--radius-sm);
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+    transition: all 0.3s ease;
+}
+
+.connection-banner.connected {
+    background: rgba(74, 222, 128, 0.1);
+    color: var(--success);
+}
+
+.connection-banner.error {
+    background: rgba(248, 113, 113, 0.1);
+    color: var(--error);
+}
+
+.connection-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--warning);
+    animation: pulse 1.5s infinite;
+}
+
+.connection-banner.connected .connection-dot {
+    background: var(--success);
+    animation: none;
+}
+
+.connection-banner.error .connection-dot {
+    background: var(--error);
+    animation: pulse 1s infinite;
+}
+
+@keyframes pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.5; transform: scale(0.9); }
+}
+
+/* Cards */
+.card {
+    background: var(--bg-card);
+    border-radius: var(--radius);
+    padding: 1.5rem;
+    margin-bottom: 1rem;
+    border: 1px solid var(--border);
+    box-shadow: var(--shadow);
+}
+
+/* Sync Section */
+.sync-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 1.5rem;
+}
+
+.sync-status {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.status-indicator {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: var(--warning);
+    animation: pulse 2s infinite;
+    box-shadow: 0 0 8px var(--warning);
+}
+
+.status-indicator.synced {
+    background: var(--success);
+    animation: none;
+    box-shadow: 0 0 8px var(--success);
+}
+
+.status-indicator.syncing {
+    background: var(--syncing);
+    box-shadow: 0 0 8px var(--syncing);
+}
+
+.sync-label {
+    font-size: 1rem;
+    font-weight: 500;
+}
+
+.mining-badge {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    background: rgba(233, 69, 96, 0.15);
+    color: var(--accent-primary);
+    padding: 0.35rem 0.75rem;
+    border-radius: 20px;
+    font-size: 0.8rem;
+    font-weight: 500;
+}
+
+.mining-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--accent-primary);
+    animation: pulse 1s infinite;
+}
+
+/* Progress Bars */
+.progress-container {
+    margin-bottom: 1.5rem;
+}
+
+.progress-row {
+    display: grid;
+    grid-template-columns: 70px 1fr 100px;
+    align-items: center;
+    gap: 1rem;
+    margin-bottom: 0.75rem;
+}
+
+.progress-row label {
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+}
+
+.progress-bar {
+    height: 8px;
+    background: var(--accent-tertiary);
+    border-radius: 4px;
+    overflow: hidden;
+    position: relative;
+}
+
+.progress-fill {
+    height: 100%;
+    border-radius: 4px;
+    transition: width 0.5s ease;
+    position: relative;
+}
+
+.progress-fill::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: linear-gradient(
+        90deg,
+        transparent,
+        rgba(255, 255, 255, 0.1),
+        transparent
+    );
+    animation: shimmer 2s infinite;
+}
+
+@keyframes shimmer {
+    0% { transform: translateX(-100%); }
+    100% { transform: translateX(100%); }
+}
+
+.progress-fill.headers {
+    background: linear-gradient(90deg, var(--syncing), #93c5fd);
+}
+
+.progress-fill.blocks {
+    background: linear-gradient(90deg, var(--success-dim), var(--success));
+}
+
+.progress-count {
+    text-align: right;
+    font-family: monospace;
+    font-size: 0.9rem;
+    color: var(--text-secondary);
+}
+
+/* Stats Grid */
+.stats-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 1rem;
+}
+
+.stat-card {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    background: var(--accent-tertiary);
+    padding: 1rem;
+    border-radius: var(--radius-sm);
+    transition: background 0.2s ease;
+}
+
+.stat-card:hover {
+    background: var(--bg-card-hover);
+}
+
+.stat-icon {
+    width: 40px;
+    height: 40px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: var(--radius-sm);
+    flex-shrink: 0;
+}
+
+.stat-icon svg {
+    width: 20px;
+    height: 20px;
+}
+
+.peers-icon {
+    background: rgba(96, 165, 250, 0.15);
+    color: var(--syncing);
+}
+
+.mempool-icon {
+    background: rgba(233, 69, 96, 0.15);
+    color: var(--accent-primary);
+}
+
+.size-icon {
+    background: rgba(74, 222, 128, 0.15);
+    color: var(--success);
+}
+
+.stat-content {
+    min-width: 0;
+}
+
+.stat-value {
+    font-size: 1.25rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    font-family: monospace;
+}
+
+.stat-label {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+/* Mempool Section */
+.mempool-section {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+}
+
+.section-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 1rem;
+}
+
+.section-header h2 {
+    font-size: 1rem;
+    font-weight: 500;
+    color: var(--text-primary);
+}
+
+.mempool-legend {
+    display: flex;
+    gap: 1rem;
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+}
+
+.legend-item {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+}
+
+.legend-color {
+    width: 10px;
+    height: 10px;
+    border-radius: 2px;
+}
+
+.legend-color.low-fee { background: var(--low-fee); }
+.legend-color.med-fee { background: var(--med-fee); }
+.legend-color.high-fee { background: var(--high-fee); }
+
+.canvas-container {
+    flex: 1;
+    position: relative;
+    min-height: 300px;
+    background: var(--bg-dark);
+    border-radius: var(--radius-sm);
+    overflow: hidden;
+}
+
+#mempool-canvas {
+    width: 100%;
+    height: 100%;
+    display: block;
+}
+
+.empty-mempool {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    text-align: center;
+    color: var(--text-muted);
+}
+
+.empty-mempool svg {
+    width: 48px;
+    height: 48px;
+    margin-bottom: 1rem;
+    opacity: 0.3;
+}
+
+.empty-mempool p {
+    font-size: 0.95rem;
+    color: var(--text-secondary);
+    margin-bottom: 0.25rem;
+}
+
+.empty-mempool span {
+    font-size: 0.8rem;
+}
+
+.empty-mempool.hidden {
+    display: none;
+}
+
+/* Footer */
+.footer {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding-top: 1rem;
+    margin-top: auto;
+    border-top: 1px solid var(--border);
+    font-size: 0.8rem;
+    color: var(--text-muted);
+}
+
+.footer a {
+    color: var(--syncing);
+    text-decoration: none;
+    transition: color 0.2s ease;
+}
+
+.footer a:hover {
+    color: var(--text-primary);
+}
+
+/* Responsive */
+@media (max-width: 640px) {
+    .container {
+        padding: 1rem;
+    }
+
+    .header {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 0.75rem;
+    }
+
+    .header-info {
+        width: 100%;
+        justify-content: flex-start;
+    }
+
+    .stats-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .progress-row {
+        grid-template-columns: 60px 1fr 70px;
+        gap: 0.5rem;
+    }
+
+    .section-header {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 0.5rem;
+    }
+
+    .mempool-legend {
+        flex-wrap: wrap;
+    }
+}
+
+/* Animations for transaction blocks */
+@keyframes fall-in {
+    0% {
+        transform: translateY(-20px);
+        opacity: 0;
+    }
+    100% {
+        transform: translateY(0);
+        opacity: 1;
+    }
+}
+
+@keyframes confirmed {
+    0% {
+        transform: scale(1);
+        opacity: 1;
+    }
+    50% {
+        transform: scale(1.2);
+        box-shadow: 0 0 20px var(--success);
+    }
+    100% {
+        transform: scale(0) translateY(-50px);
+        opacity: 0;
+    }
+}
