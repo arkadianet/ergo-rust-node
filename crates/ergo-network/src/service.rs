@@ -22,6 +22,9 @@ use tokio::sync::mpsc;
 use tokio_util::codec::Framed;
 use tracing::{debug, error, info, warn};
 
+/// Interval in seconds for periodic cleanup tasks (e.g., expired bans).
+const CLEANUP_INTERVAL_SECS: u64 = 60;
+
 /// Network service configuration.
 #[derive(Debug, Clone)]
 pub struct NetworkConfig {
@@ -141,6 +144,10 @@ impl NetworkService {
 
         let mut command_rx = self.command_rx.take().unwrap();
 
+        // Periodic cleanup interval
+        let mut cleanup_interval =
+            tokio::time::interval(std::time::Duration::from_secs(CLEANUP_INTERVAL_SECS));
+
         loop {
             tokio::select! {
                 // Accept incoming connections
@@ -175,6 +182,11 @@ impl NetworkService {
                             break;
                         }
                     }
+                }
+
+                // Periodic cleanup tasks
+                _ = cleanup_interval.tick() => {
+                    self.peer_manager.cleanup_expired_bans();
                 }
             }
         }

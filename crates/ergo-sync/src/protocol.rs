@@ -205,6 +205,19 @@ const V2_SYNC_OFFSETS: [u32; 4] = [0, 16, 128, 512];
 /// Maximum number of headers to buffer before flushing to storage.
 const HEADER_BATCH_SIZE: usize = 200;
 
+/// Maximum size of the stored_headers LRU cache.
+/// 50,000 entries covers ~2 days of blocks at 2min/block, plenty for active sync window.
+const STORED_HEADERS_CACHE_SIZE: usize = 50_000;
+
+/// Maximum size of the pending_headers map (headers waiting for their parent).
+const MAX_PENDING_HEADERS: usize = 10_000;
+
+/// Maximum size of the pending_header_inv queue.
+const MAX_PENDING_HEADER_INV: usize = 10_000;
+
+/// Number of blocks applied before clearing the completed downloads set.
+const BLOCKS_APPLIED_CLEAR_INTERVAL: u32 = 1000;
+
 /// Maximum time to buffer headers before flushing (milliseconds).
 const HEADER_BATCH_TIMEOUT_MS: u64 = 500;
 
@@ -226,7 +239,8 @@ pub struct SyncProtocol {
     /// Headers pending storage (waiting for parent).
     pending_headers: RwLock<HashMap<Vec<u8>, PendingHeader>>,
     /// Headers we've successfully stored (by ID).
-    stored_headers: RwLock<std::collections::HashSet<Vec<u8>>>,
+    /// Uses LRU cache to bound memory - old entries are evicted automatically.
+    stored_headers: parking_lot::Mutex<lru::LruCache<Vec<u8>, ()>>,
     /// Command sender.
     command_tx: mpsc::Sender<SyncCommand>,
     /// Pending header IDs from Inv that we haven't requested yet.
@@ -244,6 +258,8 @@ pub struct SyncProtocol {
     /// Timestamp when the first header was added to pending_header_writes.
     /// Used to trigger timeout-based flushing.
     pending_header_writes_since: RwLock<Option<std::time::Instant>>,
+    /// Counter for blocks applied since last clear of completed downloads set.
+    blocks_applied_since_clear: std::sync::atomic::AtomicU32,
 }
 
 /// Peer chain status relative to ours.
@@ -361,9 +377,11 @@ impl SyncProtocol {
         // We pre-seed this so that when we receive the height=1 header, its parent is "available"
         let genesis_parent_id = vec![0u8; 32];
 
-        let mut stored = std::collections::HashSet::new();
+        // Initialize LRU cache for stored headers with genesis parent pre-seeded
+        let mut stored =
+            lru::LruCache::new(std::num::NonZeroUsize::new(STORED_HEADERS_CACHE_SIZE).unwrap());
         // Consider genesis parent as "stored" so height-1 headers can be applied
-        stored.insert(genesis_parent_id);
+        stored.put(genesis_parent_id, ());
 
         Self {
             synchronizer: Arc::new(Synchronizer::new(config)),
@@ -373,7 +391,7 @@ impl SyncProtocol {
             v2_sync_headers: RwLock::new(Vec::new()),
             sync_peers: RwLock::new(HashMap::new()),
             pending_headers: RwLock::new(HashMap::new()),
-            stored_headers: RwLock::new(stored),
+            stored_headers: parking_lot::Mutex::new(stored),
             command_tx,
             pending_header_inv: RwLock::new(VecDeque::new()),
             in_flight_headers: RwLock::new(HashMap::new()),
@@ -384,6 +402,7 @@ impl SyncProtocol {
             )),
             pending_header_writes: RwLock::new(Vec::new()),
             pending_header_writes_since: RwLock::new(None),
+            blocks_applied_since_clear: std::sync::atomic::AtomicU32::new(0),
         }
     }
 
@@ -396,9 +415,14 @@ impl SyncProtocol {
     /// This should be called before starting sync if we have previously synced headers.
     ///
     /// # Arguments
-    /// * `all_header_ids` - All stored header IDs (for tracking which headers we have)
+    /// * `all_header_ids` - All stored header IDs (for tracking which headers we have).
+    ///   **IMPORTANT**: Must be in ascending height order (oldest first, newest last).
+    ///   Only the most recent ones (up to STORED_HEADERS_CACHE_SIZE) are loaded into the LRU cache.
     /// * `locator_ids` - Exponentially spaced header IDs for SyncInfo messages
     /// * `v2_headers` - Headers at V2 SyncInfo offsets [0, 16, 128, 512] from best height (newest first)
+    ///
+    /// # Panics
+    /// Debug builds will panic if `v2_headers` is not in descending height order (newest first).
     pub fn init_from_stored_headers(
         &self,
         all_header_ids: Vec<Vec<u8>>,
@@ -409,18 +433,33 @@ impl SyncProtocol {
             return;
         }
 
+        // Verify v2_headers ordering assumption in debug builds
+        debug_assert!(
+            v2_headers.windows(2).all(|w| w[0].height >= w[1].height),
+            "v2_headers must be in descending height order (newest first)"
+        );
+
+        // Only load the most recent header IDs into the LRU cache to bound memory.
+        // The all_header_ids are assumed to be in ascending order, so we take the last N.
+        let ids_to_load = if all_header_ids.len() > STORED_HEADERS_CACHE_SIZE {
+            &all_header_ids[all_header_ids.len() - STORED_HEADERS_CACHE_SIZE..]
+        } else {
+            &all_header_ids[..]
+        };
+
         info!(
-            "Initializing sync protocol with {} stored headers, {} locator headers, {} V2 sync headers",
+            "Initializing sync protocol with {} stored headers (loading {} into cache), {} locator headers, {} V2 sync headers",
             all_header_ids.len(),
+            ids_to_load.len(),
             locator_ids.len(),
             v2_headers.len()
         );
 
-        // Add all header IDs to stored set (for tracking what we already have)
+        // Add recent header IDs to stored cache (for tracking what we already have)
         {
-            let mut stored = self.stored_headers.write();
-            for id in all_header_ids {
-                stored.insert(id);
+            let mut stored = self.stored_headers.lock();
+            for id in ids_to_load {
+                stored.put(id.clone(), ());
             }
         }
 
@@ -778,7 +817,7 @@ impl SyncProtocol {
             let original_count = inv.ids.len();
             let (filtered_ids, removed_count): (Vec<Vec<u8>>, usize) = if is_header_inv {
                 // Filter out already-stored headers
-                let stored = self.stored_headers.read();
+                let stored = self.stored_headers.lock();
                 let mut filtered = Vec::new();
                 let mut removed = 0;
                 for id in inv.ids {
@@ -841,6 +880,13 @@ impl SyncProtocol {
                         "Storing remaining header IDs from Inv for later"
                     );
                     let mut pending = self.pending_header_inv.write();
+                    // Evict oldest entries if adding these would exceed the limit
+                    let space_needed = remaining.len();
+                    while pending.len() + space_needed > MAX_PENDING_HEADER_INV
+                        && !pending.is_empty()
+                    {
+                        pending.pop_front();
+                    }
                     pending.extend(remaining);
                 }
             }
@@ -995,9 +1041,16 @@ impl SyncProtocol {
 
         let parent_id = header.parent_id.0.as_ref().to_vec();
 
-        // Check if we already have this header (in our in-memory tracking)
-        // Use correct_id since that's what we store
-        let already_stored = self.stored_headers.read().contains(&correct_id);
+        // Check header status in a single lock acquisition to reduce contention
+        let (already_stored, parent_available, stored_count) = {
+            let stored = self.stored_headers.lock();
+            (
+                stored.contains(&correct_id),
+                stored.contains(&parent_id),
+                stored.len(),
+            )
+        };
+
         if already_stored {
             // Log at info level for first few headers to diagnose restart behavior
             if header.height <= 5 || header.height % 100 == 0 {
@@ -1009,16 +1062,13 @@ impl SyncProtocol {
             return Ok(());
         }
 
-        // Check if parent is available (either genesis or already stored)
-        let parent_available = self.stored_headers.read().contains(&parent_id);
-
         // Log for first few headers to diagnose, or for any header around the sync point
         if header.height <= 5 || (header.height >= 3130 && header.height <= 3140) {
             info!(
                 height = header.height,
                 parent = hex::encode(&parent_id),
                 parent_available,
-                stored_count = self.stored_headers.read().len(),
+                stored_count,
                 "Processing header - checking parent"
             );
         }
@@ -1032,6 +1082,23 @@ impl SyncProtocol {
             // Use correct_id for pending tracking
             let pending_count = {
                 let mut pending = self.pending_headers.write();
+
+                // Evict oldest entries if at capacity to bound memory
+                if pending.len() >= MAX_PENDING_HEADERS {
+                    // Find and remove the entry with the lowest height
+                    let oldest_key = pending
+                        .iter()
+                        .min_by_key(|(_, ph)| ph.header.height)
+                        .map(|(k, _)| k.clone());
+                    if let Some(key) = oldest_key {
+                        pending.remove(&key);
+                        debug!(
+                            evicted_for_height = header.height,
+                            "Evicted oldest pending header to make room"
+                        );
+                    }
+                }
+
                 pending.insert(
                     correct_id.clone(),
                     PendingHeader {
@@ -1049,7 +1116,7 @@ impl SyncProtocol {
                     height = header.height,
                     parent = hex::encode(&parent_id),
                     pending_count,
-                    stored_count = self.stored_headers.read().len(),
+                    stored_count = self.stored_headers.lock().len(),
                     "Buffering header - parent not available"
                 );
             }
@@ -1181,7 +1248,7 @@ impl SyncProtocol {
 
         // Optimistically mark as stored so descendants can be processed
         // This is safe because if the batch write fails, we'll error out anyway
-        self.stored_headers.write().insert(header_id.clone());
+        self.stored_headers.lock().put(header_id.clone(), ());
 
         // Compute the BlockTransactions ID (derived from header ID + transactions root)
         // This is NOT the same as the header ID!
@@ -1478,6 +1545,52 @@ impl SyncProtocol {
         // Also remove the header_id itself from completed (in case it was tracked that way)
         self.downloader.uncomplete(block_id);
 
+        // Track blocks applied and periodically clear completed downloads set to free memory.
+        // Use a loop with compare_exchange to avoid race conditions where multiple threads
+        // could see count >= threshold before any resets it.
+        loop {
+            let count = self
+                .blocks_applied_since_clear
+                .load(std::sync::atomic::Ordering::Relaxed);
+            if count >= BLOCKS_APPLIED_CLEAR_INTERVAL {
+                // Try to atomically reset the counter - only one thread will succeed
+                if self
+                    .blocks_applied_since_clear
+                    .compare_exchange(
+                        count,
+                        0,
+                        std::sync::atomic::Ordering::Relaxed,
+                        std::sync::atomic::Ordering::Relaxed,
+                    )
+                    .is_ok()
+                {
+                    self.downloader.clear_completed();
+                    debug!(
+                        height,
+                        "Cleared completed downloads set after {} blocks",
+                        BLOCKS_APPLIED_CLEAR_INTERVAL
+                    );
+                }
+                // If compare_exchange failed, another thread reset it - that's fine
+                break;
+            } else {
+                // Try to increment the counter
+                if self
+                    .blocks_applied_since_clear
+                    .compare_exchange(
+                        count,
+                        count + 1,
+                        std::sync::atomic::Ordering::Relaxed,
+                        std::sync::atomic::Ordering::Relaxed,
+                    )
+                    .is_ok()
+                {
+                    break;
+                }
+                // If compare_exchange failed, another thread modified it - retry
+            }
+        }
+
         // Log memory stats periodically (every 1000 blocks)
         if height % 1000 == 0 {
             let (headers, pending, mappings) = chain.memory_stats();
@@ -1630,6 +1743,10 @@ impl SyncProtocol {
             let mut pending = self.pending_header_inv.write();
             for id in timed_out_headers {
                 in_flight.remove(&id);
+                // Evict from back if at capacity before pushing to front
+                if pending.len() >= MAX_PENDING_HEADER_INV {
+                    pending.pop_back();
+                }
                 // Re-queue at front for faster retry
                 pending.push_front(id);
             }
@@ -1804,7 +1921,7 @@ impl SyncProtocol {
         // (they might be stuck because we received non-consecutive headers)
         // But DON'T clear them if we have stored headers (restart case)
         let pending_count = self.pending_headers.read().len();
-        let stored_count = self.stored_headers.read().len();
+        let stored_count = self.stored_headers.lock().len();
         if pending_count > 0 && stored_count == 0 {
             // Clear pending headers only if we're truly a fresh node with no stored headers
             // (they were probably from non-consecutive SyncInfo samples)
@@ -1822,7 +1939,7 @@ impl SyncProtocol {
 
                 // Filter out already-stored headers to avoid requesting duplicates
                 let pending_ids: Vec<Vec<u8>> = {
-                    let stored = self.stored_headers.read();
+                    let stored = self.stored_headers.lock();
                     let mut pending = self.pending_header_inv.write();
                     let mut ids = Vec::new();
                     while ids.len() < MAX_REQUEST_SIZE && !pending.is_empty() {
