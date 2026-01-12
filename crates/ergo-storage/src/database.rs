@@ -2,7 +2,9 @@
 
 use crate::{Storage, StorageError, StorageResult, WriteBatch};
 use parking_lot::RwLock;
-use rocksdb::{ColumnFamilyDescriptor, DBWithThreadMode, MultiThreaded, Options};
+use rocksdb::{
+    BlockBasedOptions, Cache, ColumnFamilyDescriptor, DBWithThreadMode, MultiThreaded, Options,
+};
 use std::path::Path;
 use std::sync::Arc;
 use tracing::{debug, info};
@@ -136,6 +138,12 @@ impl Database {
         // Data is still durable via WAL, just not synced immediately
         opts.set_manual_wal_flush(true);
 
+        // Create a SHARED block cache for all column families.
+        // This is critical for bounding memory - without explicit configuration,
+        // each CF gets an unbounded default cache that can grow to gigabytes.
+        // 256MB is enough for good read performance while keeping memory bounded.
+        let block_cache = Cache::new_lru_cache(256 * 1024 * 1024); // 256MB shared
+
         // Create column family descriptors
         let cf_descriptors: Vec<ColumnFamilyDescriptor> = ColumnFamily::all()
             .iter()
@@ -146,6 +154,15 @@ impl Database {
                 // 19 CFs * 32MB = ~600MB total for CF write buffers
                 // This significantly reduces compaction during sync
                 cf_opts.set_write_buffer_size(32 * 1024 * 1024); // 32MB per CF
+
+                // Configure block-based table with shared cache
+                let mut block_opts = BlockBasedOptions::default();
+                block_opts.set_block_cache(&block_cache);
+                // Keep index and filter blocks in cache for better read performance
+                block_opts.set_cache_index_and_filter_blocks(true);
+                block_opts.set_pin_l0_filter_and_index_blocks_in_cache(true);
+                cf_opts.set_block_based_table_factory(&block_opts);
+
                 ColumnFamilyDescriptor::new(cf.name(), cf_opts)
             })
             .collect();
