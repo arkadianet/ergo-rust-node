@@ -25,11 +25,12 @@ use crate::params::{
 use crate::{ConsensusError, ConsensusResult};
 use blake2::{Blake2b, Digest};
 pub use ergo_chain_types::AutolykosSolution;
-use ergo_chain_types::Header;
+use ergo_chain_types::{ec_point, Header};
 use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
+use k256::{elliptic_curve::ops::Reduce, Scalar, U256};
 use num_bigint::BigUint;
 use std::sync::LazyLock;
-use tracing::{debug, trace};
+use tracing::{debug, trace, warn};
 
 /// Size of Blake2b256 output.
 const HASH_SIZE: usize = 32;
@@ -57,6 +58,57 @@ static GROUP_ORDER: LazyLock<BigUint> = LazyLock::new(|| {
     )
     .expect("hardcoded group order must parse")
 });
+
+/// Valid range for hashModQ rejection sampling.
+/// This is (2^256 / q) * q - the largest number <= 2^256 divisible by q.
+/// Used in Autolykos v1 to ensure uniform distribution mod q.
+static VALID_RANGE: LazyLock<BigUint> = LazyLock::new(|| {
+    let two_256 = BigUint::from(1u8) << 256;
+    (&two_256 / &*GROUP_ORDER) * &*GROUP_ORDER
+});
+
+/// Compute Blake2b256 hash and reduce mod q (group order).
+/// Uses rejection sampling to ensure uniform distribution.
+/// Used in Autolykos v1 for element generation.
+fn hash_mod_q(input: &[u8]) -> BigUint {
+    let mut current_input = input.to_vec();
+    loop {
+        let mut hasher = Blake2b::<typenum::U32>::new();
+        Digest::update(&mut hasher, &current_input);
+        let hash: [u8; HASH_SIZE] = hasher.finalize().into();
+
+        // Interpret hash as unsigned big integer
+        let bi = BigUint::from_bytes_be(&hash);
+
+        if bi < *VALID_RANGE {
+            // In valid range, return result mod q
+            return bi % &*GROUP_ORDER;
+        }
+
+        // Outside valid range, hash again using the hash as input
+        // This is rejection sampling to ensure uniform distribution
+        trace!("hashModQ: result outside valid range, rehashing");
+        current_input = hash.to_vec();
+    }
+}
+
+/// Convert BigUint to k256 Scalar, reducing mod group order.
+fn biguint_to_scalar(value: &BigUint) -> Scalar {
+    let mut arr = [0u8; 32];
+    let bytes = value.to_bytes_be();
+
+    if bytes.len() > 32 {
+        // Value larger than 32 bytes - reduce first
+        let reduced = value % &*GROUP_ORDER;
+        let b = reduced.to_bytes_be();
+        arr[32 - b.len()..].copy_from_slice(&b);
+    } else {
+        arr[32 - bytes.len()..].copy_from_slice(&bytes);
+    }
+
+    // Reduce mod group order
+    Scalar::reduce(U256::from_be_slice(&arr))
+}
 
 /// Autolykos v2 PoW verifier.
 #[derive(Debug, Clone)]
@@ -178,59 +230,147 @@ impl AutolykosV2 {
         let big_n = self.calc_big_n(version, height);
 
         // Branch on version: v1 and v2 use different algorithms
-        let (hit, hit_value) = if version < AUTOLYKOS_V2_VERSION {
+        if version < AUTOLYKOS_V2_VERSION {
             // ===== Autolykos v1 =====
-            // msg_v1 = H(header || nonce)
-            let msg = Self::calculate_msg_v1(header_bytes, &solution.nonce);
-            trace!("PoW v1 msg hash: {}", hex::encode(&msg));
-
-            // Get miner public key bytes (needed for v1)
-            let pk_bytes = solution.miner_pk.sigma_serialize_bytes().map_err(|e| {
-                ConsensusError::InvalidPow(format!("Failed to serialize miner pk: {}", e))
-            })?;
-
-            // seed_v1 = H(msg || pk)
-            let seed = self.calculate_seed_v1(&msg, &pk_bytes);
-            trace!("PoW v1 seed: {}", hex::encode(&seed));
-
-            // Generate indices: H(seed || i) mod N
-            let indices = self.generate_indices_v1(&seed, big_n);
-            trace!("Generated {} v1 indices", indices.len());
-
-            // f_sum = sum of H(idx || msg || pk)
-            let f_sum = self.calculate_f_sum_v1(&indices, &msg, &pk_bytes);
-
-            // hit = H(f_sum)
-            let hit = self.calculate_hit_v1(&f_sum);
-            let hit_value = BigUint::from_bytes_be(&hit);
-
-            (hit, hit_value)
+            // V1 uses elliptic curve verification: w^f == g^d * pk
+            self.verify_solution_v1(header_bytes, solution, target, big_n)
         } else {
             // ===== Autolykos v2 =====
-            // msg = H(header_without_pow) — nonce NOT included
-            let msg = Self::calculate_msg(header_bytes);
-            trace!("PoW v2 msg hash: {}", hex::encode(&msg));
+            // V2 uses hash comparison: hit < target
+            self.verify_solution_v2(header_bytes, solution, target, big_n, height)
+        }
+    }
 
-            // seed = calc_seed_v2(big_n, msg, nonce, height)
-            let seed = Self::calc_seed_v2(big_n, &msg, &solution.nonce, height);
-            trace!("PoW v2 seed: {}", hex::encode(&seed));
+    /// Verify Autolykos v1 solution using EC equation: w^f == g^d * pk
+    ///
+    /// Algorithm:
+    /// 1. Check d < b (target)
+    /// 2. Check pk and w are not infinity
+    /// 3. msg = H(header_without_pow)
+    /// 4. seed = msg || nonce
+    /// 5. indices = genIndexes(seed, N)
+    /// 6. For each idx: element = hashModQ(idx || M || pk || msg || w)
+    /// 7. f = sum of elements mod q
+    /// 8. Verify: w^f == g^d * pk
+    fn verify_solution_v1(
+        &self,
+        header_bytes: &[u8],
+        solution: &AutolykosSolution,
+        target: &BigUint,
+        big_n: u32,
+    ) -> ConsensusResult<bool> {
+        // Extract v1-specific fields (must be present for v1 blocks)
+        let w = solution.pow_onetime_pk.as_ref().ok_or_else(|| {
+            ConsensusError::InvalidPow("Autolykos v1 requires pow_onetime_pk (w)".to_string())
+        })?;
+        // pow_distance is Option<BigUint> in sigma-rust develop branch (already non-negative)
+        let d_abs: &BigUint = solution.pow_distance.as_ref().ok_or_else(|| {
+            ConsensusError::InvalidPow("Autolykos v1 requires pow_distance (d)".to_string())
+        })?;
 
-            // Generate k indices using sliding window
-            let indices = self.gen_indexes(&seed, big_n);
-            trace!("Generated {} v2 indices", indices.len());
+        // Check d < target (required for valid PoW)
+        if d_abs >= target {
+            debug!(
+                "PoW v1 failed: d ({}) >= target ({})",
+                d_abs, target
+            );
+            return Ok(false);
+        }
 
-            // sum = sum of H(idx || height || M)[1..] for each index
-            let sum = Self::calc_elements_sum(&indices, height);
+        // Check pk is not infinity
+        if ec_point::is_identity(&solution.miner_pk) {
+            warn!("PoW v1: miner_pk is infinity point");
+            return Ok(false);
+        }
 
-            // hit = H(sum normalized to 32 bytes)
-            let hit = Self::calc_hit(&sum);
-            let hit_value = BigUint::from_bytes_be(&hit);
+        // Check w is not infinity
+        if ec_point::is_identity(w) {
+            warn!("PoW v1: pow_onetime_pk (w) is infinity point");
+            return Ok(false);
+        }
 
-            (hit, hit_value)
-        };
+        // msg = H(header_without_pow) - nonce NOT included in hash
+        let msg = Self::calculate_msg(header_bytes);
+        trace!("PoW v1 msg hash: {}", hex::encode(&msg));
+
+        // seed = msg || nonce (concatenation, not hashing)
+        let mut seed = Vec::with_capacity(msg.len() + solution.nonce.len());
+        seed.extend_from_slice(&msg);
+        seed.extend_from_slice(&solution.nonce);
+
+        // Generate indices using sliding window over H(seed)
+        let indices = self.gen_indexes_v1(&seed, big_n);
+        trace!("Generated {} v1 indices", indices.len());
+
+        // Get serialized pk and w bytes
+        let pk_bytes = solution.miner_pk.sigma_serialize_bytes().map_err(|e| {
+            ConsensusError::InvalidPow(format!("Failed to serialize miner pk: {}", e))
+        })?;
+        let w_bytes = w.sigma_serialize_bytes().map_err(|e| {
+            ConsensusError::InvalidPow(format!("Failed to serialize w: {}", e))
+        })?;
+
+        // Calculate f = sum of elements mod q
+        // Each element = hashModQ(idx || M || pk || msg || w)
+        let f = self.calculate_f_v1(&indices, &msg, &pk_bytes, &w_bytes);
+        trace!("PoW v1 f = {}", f);
+
+        // Convert f to scalar for EC operations
+        let f_scalar = biguint_to_scalar(&f);
+
+        // Convert d to scalar
+        let d_scalar = biguint_to_scalar(&d_abs);
+
+        // Compute left = w^f
+        let left = ec_point::exponentiate(w, &f_scalar);
+
+        // Compute right = g^d * pk
+        let g = ec_point::generator();
+        let g_d = ec_point::exponentiate(&g, &d_scalar);
+        // Note: EcPoint::Mul is actually point addition (multiplicative group notation)
+        let right = g_d * &*solution.miner_pk;
+
+        // Verify: left == right
+        let valid = left == right;
 
         debug!(
-            "PoW verification: hit={}, target={}",
+            "PoW v1 verification: w^f {} g^d * pk",
+            if valid { "==" } else { "!=" }
+        );
+
+        Ok(valid)
+    }
+
+    /// Verify Autolykos v2 solution using hash comparison: hit < target
+    fn verify_solution_v2(
+        &self,
+        header_bytes: &[u8],
+        solution: &AutolykosSolution,
+        target: &BigUint,
+        big_n: u32,
+        height: u32,
+    ) -> ConsensusResult<bool> {
+        // msg = H(header_without_pow) — nonce NOT included
+        let msg = Self::calculate_msg(header_bytes);
+        trace!("PoW v2 msg hash: {}", hex::encode(&msg));
+
+        // seed = calc_seed_v2(big_n, msg, nonce, height)
+        let seed = Self::calc_seed_v2(big_n, &msg, &solution.nonce, height);
+        trace!("PoW v2 seed: {}", hex::encode(&seed));
+
+        // Generate k indices using sliding window
+        let indices = self.gen_indexes(&seed, big_n);
+        trace!("Generated {} v2 indices", indices.len());
+
+        // sum = sum of H(idx || height || M)[1..] for each index
+        let sum = Self::calc_elements_sum(&indices, height);
+
+        // hit = H(sum normalized to 32 bytes)
+        let hit = Self::calc_hit(&sum);
+        let hit_value = BigUint::from_bytes_be(&hit);
+
+        debug!(
+            "PoW v2 verification: hit={}, target={}",
             hex::encode(&hit),
             target
         );
@@ -239,20 +379,13 @@ impl AutolykosV2 {
         Ok(hit_value < *target)
     }
 
-    /// Calculate message hash for v2: H(header_without_pow).
-    /// Note: nonce is NOT included in msg; it's used separately in seed calculation.
+    /// Calculate message hash: H(header_without_pow).
+    /// Used by both v1 and v2 - nonce is NOT included in msg.
+    /// In v1, seed = msg || nonce (concatenation).
+    /// In v2, nonce is used separately in seed calculation.
     fn calculate_msg(header_bytes: &[u8]) -> [u8; HASH_SIZE] {
         let mut hasher = Blake2b::<typenum::U32>::new();
         Digest::update(&mut hasher, header_bytes);
-        hasher.finalize().into()
-    }
-
-    /// Calculate message hash for v1: H(header_without_pow || nonce).
-    /// In v1, nonce is included in the message hash.
-    fn calculate_msg_v1(header_bytes: &[u8], nonce: &[u8]) -> [u8; HASH_SIZE] {
-        let mut hasher = Blake2b::<typenum::U32>::new();
-        Digest::update(&mut hasher, header_bytes);
-        Digest::update(&mut hasher, nonce);
         hasher.finalize().into()
     }
 
@@ -328,31 +461,65 @@ impl AutolykosV2 {
     // Autolykos v1 helpers (used for blocks before height 417,792)
     // =====================================================================
 
-    /// Calculate seed for v1: H(msg || pk)
-    fn calculate_seed_v1(&self, msg: &[u8], pk: &[u8]) -> [u8; HASH_SIZE] {
+    /// Generate k indices for v1 using sliding window over H(seed).
+    ///
+    /// Algorithm (same as Scala genIndexes):
+    /// 1. hash = H(seed)
+    /// 2. extendedHash = hash + hash[0..3] (35 bytes)
+    /// 3. For each i in 0..k: index = BigInt(extendedHash[i..i+4]) mod N
+    fn gen_indexes_v1(&self, seed: &[u8], big_n: u32) -> Vec<u32> {
+        debug_assert!(self.k <= 32, "k must be <= 32 for sliding window");
+
+        // hash = H(seed)
         let mut hasher = Blake2b::<typenum::U32>::new();
-        Digest::update(&mut hasher, msg);
-        Digest::update(&mut hasher, pk);
-        hasher.finalize().into()
+        Digest::update(&mut hasher, seed);
+        let hash: [u8; HASH_SIZE] = hasher.finalize().into();
+
+        // extendedHash = hash + hash[0..3] (35 bytes)
+        let mut extended = [0u8; 35];
+        extended[..32].copy_from_slice(&hash);
+        extended[32..35].copy_from_slice(&hash[..3]);
+
+        // Generate k indices using sliding window
+        let mut indices = Vec::with_capacity(self.k as usize);
+        for i in 0..self.k as usize {
+            // BigInt(1, extendedHash.slice(i, i + 4)) - unsigned big-endian
+            let val = u32::from_be_bytes(extended[i..i + 4].try_into().unwrap());
+            indices.push(val % big_n);
+        }
+        indices
     }
 
-    /// Generate k indices for v1: idx_i = H(seed || i) mod N
-    fn generate_indices_v1(&self, seed: &[u8], n: u32) -> Vec<u32> {
-        let mut indices = Vec::with_capacity(self.k as usize);
+    /// Calculate f for v1: sum of hashModQ(idx || M || pk || msg || w) mod q.
+    ///
+    /// Element generation: H(j|M|pk|m|w) mod q
+    /// where M is the 8KB constant, pk is miner public key, m is msg hash, w is one-time pk.
+    fn calculate_f_v1(
+        &self,
+        indices: &[u32],
+        msg: &[u8],
+        pk_bytes: &[u8],
+        w_bytes: &[u8],
+    ) -> BigUint {
+        let mut sum = BigUint::from(0u32);
 
-        for i in 0..self.k {
-            let mut hasher = Blake2b::<typenum::U32>::new();
-            Digest::update(&mut hasher, seed);
-            Digest::update(&mut hasher, &i.to_be_bytes());
-            let hash = hasher.finalize();
+        for &idx in indices {
+            // Build input: idx || M || pk || msg || w
+            let idx_bytes = idx.to_be_bytes();
+            let mut input = Vec::with_capacity(4 + BIG_M.len() + pk_bytes.len() + msg.len() + w_bytes.len());
+            input.extend_from_slice(&idx_bytes);
+            input.extend_from_slice(&*BIG_M);
+            input.extend_from_slice(pk_bytes);
+            input.extend_from_slice(msg);
+            input.extend_from_slice(w_bytes);
 
-            // Use first 4 bytes as big-endian u32, then mod N
-            let idx_bytes: [u8; 4] = hash[0..4].try_into().unwrap();
-            let idx = u32::from_be_bytes(idx_bytes) % n;
-            indices.push(idx);
+            // element = hashModQ(input)
+            let element = hash_mod_q(&input);
+            sum += element;
         }
 
-        indices
+        // Return sum mod q
+        sum % &*GROUP_ORDER
     }
 
     /// Calculate sum of elements for v2: sum of H(idx || height || M)[1..] for each index.
@@ -408,31 +575,6 @@ impl AutolykosV2 {
 
         let mut hasher = Blake2b::<typenum::U32>::new();
         Digest::update(&mut hasher, &normalized);
-        hasher.finalize().into()
-    }
-
-    /// Calculate sum of f values for v1: f(i) = H(i || msg || pk)
-    fn calculate_f_sum_v1(&self, indices: &[u32], msg: &[u8], pk: &[u8]) -> Vec<u8> {
-        let mut sum = BigUint::from(0u32);
-
-        for &idx in indices {
-            let mut hasher = Blake2b::<typenum::U32>::new();
-            Digest::update(&mut hasher, &idx.to_be_bytes());
-            Digest::update(&mut hasher, msg);
-            Digest::update(&mut hasher, pk);
-            let f_value = hasher.finalize();
-
-            let element_val = BigUint::from_bytes_be(&f_value);
-            sum += element_val;
-        }
-
-        sum.to_bytes_be()
-    }
-
-    /// Calculate hit for v1: H(f_sum)
-    fn calculate_hit_v1(&self, f_sum: &[u8]) -> [u8; HASH_SIZE] {
-        let mut hasher = Blake2b::<typenum::U32>::new();
-        Digest::update(&mut hasher, f_sum);
         hasher.finalize().into()
     }
 
