@@ -121,12 +121,16 @@ impl Database {
         opts.set_max_total_wal_size(64 * 1024 * 1024); // 64MB WAL (reduced from 128MB)
 
         // Performance optimizations for sync workload
-        // Balance between performance and memory usage
-        opts.set_write_buffer_size(16 * 1024 * 1024); // 16MB write buffer (reduced from 64MB)
-        opts.set_max_write_buffer_number(2); // Keep 2 write buffers (reduced from 4)
-        opts.set_min_write_buffer_number_to_merge(1); // Merge when 1 is full
-        opts.set_level_zero_file_num_compaction_trigger(4);
+        // Larger buffers reduce write amplification by delaying compaction
+        opts.set_write_buffer_size(64 * 1024 * 1024); // 64MB write buffer
+        opts.set_max_write_buffer_number(4); // Keep 4 write buffers for better batching
+        opts.set_min_write_buffer_number_to_merge(2); // Merge when 2 are full
+        opts.set_level_zero_file_num_compaction_trigger(8); // Delay L0 compaction
         opts.set_max_background_jobs(4); // Background compaction threads
+
+        // Reduce write amplification by increasing level size multiplier
+        // Default is 10x between levels; 20x means fewer levels and less frequent compaction
+        opts.set_max_bytes_for_level_multiplier(20.0);
 
         // Disable fsync on every write for better performance during sync
         // Data is still durable via WAL, just not synced immediately
@@ -138,9 +142,10 @@ impl Database {
             .map(|cf| {
                 let mut cf_opts = Options::default();
                 cf_opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
-                // Moderate buffer size per CF to control memory usage
-                // 19 CFs * 8MB = ~150MB total for CF write buffers
-                cf_opts.set_write_buffer_size(8 * 1024 * 1024); // 8MB per CF (reduced from 32MB)
+                // Larger buffer per CF reduces flush frequency
+                // 19 CFs * 32MB = ~600MB total for CF write buffers
+                // This significantly reduces compaction during sync
+                cf_opts.set_write_buffer_size(32 * 1024 * 1024); // 32MB per CF
                 ColumnFamilyDescriptor::new(cf.name(), cf_opts)
             })
             .collect();

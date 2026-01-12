@@ -65,14 +65,129 @@ impl StateManager {
         info!(
             utxo_height = utxo.height(),
             header_height = history.best_height(),
+            full_block_height = history.best_full_block_height(),
             "State manager initialized"
         );
 
-        Ok(Self {
+        let mut manager = Self {
             utxo,
             history,
             state_root_verification: StateRootVerification::default(),
-        })
+        };
+
+        // Check UTXO state consistency and auto-recover if needed
+        manager.check_and_recover_utxo_state()?;
+
+        Ok(manager)
+    }
+
+    /// Check UTXO state consistency and rollback if corrupted.
+    /// This handles the case where the node crashed mid-write, leaving the
+    /// UTXO height updated but boxes not written.
+    fn check_and_recover_utxo_state(&mut self) -> StateResult<()> {
+        let utxo_height = self.utxo.height();
+        if utxo_height == 0 {
+            return Ok(()); // Fresh state, nothing to check
+        }
+
+        // Try to find a consistent UTXO state by checking progressively older blocks
+        // We'll check the current height, then go back in larger steps if needed
+        let check_heights = [
+            utxo_height,
+            utxo_height.saturating_sub(100),
+            utxo_height.saturating_sub(500),
+            utxo_height.saturating_sub(1000),
+            utxo_height.saturating_sub(5000),
+            utxo_height.saturating_sub(10000),
+        ];
+
+        let mut last_good_height: Option<u32> = None;
+
+        for &check_height in &check_heights {
+            if check_height == 0 {
+                continue;
+            }
+
+            // Get the header at this height
+            let header = match self.history.headers.get_by_height(check_height)? {
+                Some(h) => h,
+                None => continue,
+            };
+
+            // Try to get the block transactions
+            let block_txs = match self.history.blocks.get_transactions(&header.id)? {
+                Some(txs) => txs,
+                None => {
+                    // No block transactions - can't verify this height
+                    continue;
+                }
+            };
+
+            // Check if coinbase outputs exist in UTXO
+            if let Some(coinbase) = block_txs.txs.first() {
+                let mut found_any = false;
+                for output in &coinbase.outputs {
+                    let box_id = output.box_id();
+                    if self.utxo.get_box(&box_id)?.is_some() {
+                        found_any = true;
+                        break;
+                    }
+                }
+
+                if found_any {
+                    // Found a consistent height
+                    last_good_height = Some(check_height);
+                    break;
+                }
+            }
+        }
+
+        // Determine if we need to rollback
+        let current_height = self.utxo.height();
+
+        match last_good_height {
+            Some(good_height) if good_height < current_height => {
+                // We found corruption - rollback to slightly before the last good height
+                // (in case there are issues at the boundary)
+                let target_height = good_height.saturating_sub(10);
+                warn!(
+                    current_height,
+                    last_good_height = good_height,
+                    target_height,
+                    "UTXO state corruption detected, rolling back"
+                );
+
+                self.utxo.rollback(target_height)?;
+
+                info!(
+                    new_height = self.utxo.height(),
+                    "UTXO state recovered via rollback"
+                );
+            }
+            None => {
+                // Couldn't find any consistent state - severe corruption
+                // Rollback to very early height or genesis
+                let target_height = 1; // Near genesis
+                warn!(
+                    current_height,
+                    "Severe UTXO state corruption - no consistent state found. Rolling back to near genesis."
+                );
+
+                self.utxo.rollback(target_height)?;
+
+                info!(
+                    new_height = self.utxo.height(),
+                    "UTXO state recovered via rollback to near genesis"
+                );
+            }
+            Some(good_height) if good_height == current_height => {
+                // Current state is consistent
+                debug!(current_height, "UTXO state consistency check passed");
+            }
+            _ => {}
+        }
+
+        Ok(())
     }
 
     /// Set the state root verification mode.
@@ -119,6 +234,18 @@ impl StateManager {
         raw_bytes: &[u8],
     ) -> StateResult<crate::ChainSelection> {
         self.history.append_header_with_bytes(header, raw_bytes)
+    }
+
+    /// Apply multiple validated headers in a single batched write operation.
+    /// This is significantly more efficient than applying headers individually during sync.
+    ///
+    /// Headers must be in ascending height order and form a valid chain.
+    #[instrument(skip(self, headers), fields(count = headers.len()))]
+    pub fn apply_headers_batched(
+        &self,
+        headers: Vec<(Header, Vec<u8>)>,
+    ) -> StateResult<crate::ChainSelection> {
+        self.history.append_headers_batched(headers)
     }
 
     /// Apply a validated full block to the state.

@@ -708,6 +708,38 @@ impl Node {
                                 };
                                 let _ = response_tx.send(result);
                             }
+                            SyncCommand::StoreHeadersBatch { headers, response_tx } => {
+                                let count = headers.len();
+                                if count == 0 {
+                                    let _ = response_tx.send(Ok(()));
+                                    continue;
+                                }
+                                let first_height = headers[0].0.height;
+                                let last_height = headers[count - 1].0.height;
+                                let result = match state_for_router.apply_headers_batched(headers) {
+                                    Ok(_) => {
+                                        info!(
+                                            first_height,
+                                            last_height,
+                                            count,
+                                            "Batch of {} headers stored in state",
+                                            count
+                                        );
+                                        Ok(())
+                                    }
+                                    Err(e) => {
+                                        warn!(
+                                            first_height,
+                                            last_height,
+                                            count,
+                                            error = %e,
+                                            "Failed to store header batch"
+                                        );
+                                        Err(e.to_string())
+                                    }
+                                };
+                                let _ = response_tx.send(result);
+                            }
                             SyncCommand::ApplyBlock { block_id, block_data } => {
                                 // Get the header to determine block height
                                 let header_id = BlockId(

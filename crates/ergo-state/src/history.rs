@@ -845,6 +845,184 @@ impl History {
         Ok(selection)
     }
 
+    /// Append multiple headers in a single batched write operation.
+    /// This is significantly more efficient than appending headers individually during sync.
+    ///
+    /// Headers must be in ascending height order and form a valid chain (each header's
+    /// parent must be either in this batch or already in the database).
+    ///
+    /// Returns the chain selection for the last (highest) header in the batch.
+    #[instrument(skip(self, headers), fields(count = headers.len()))]
+    pub fn append_headers_batched(
+        &self,
+        headers: Vec<(Header, Vec<u8>)>,
+    ) -> StateResult<ChainSelection> {
+        if headers.is_empty() {
+            return Ok(ChainSelection::Ignored);
+        }
+
+        let first_height = headers[0].0.height;
+        let last_height = headers[headers.len() - 1].0.height;
+        let count = headers.len();
+
+        info!(
+            first_height,
+            last_height, count, "Appending {} headers in batched write", count
+        );
+
+        // Create a single batch for ALL headers
+        let mut batch = WriteBatch::new();
+
+        // Track headers we're adding in this batch for parent lookups
+        let mut batch_header_ids: std::collections::HashSet<Vec<u8>> =
+            std::collections::HashSet::new();
+
+        // Get starting cumulative difficulty from parent of first header
+        let first_header = &headers[0].0;
+        let mut cumulative_difficulty = if first_header.height <= 2 {
+            BigUint::from(0u32)
+        } else {
+            self.get_cumulative_difficulty(&first_header.parent_id)?
+                .unwrap_or_else(|| BigUint::from(0u32))
+        };
+
+        let mut final_header_id = first_header.id.clone();
+        let mut final_height = first_header.height;
+        let mut final_cumulative_difficulty = cumulative_difficulty.clone();
+
+        for (header, raw_bytes) in &headers {
+            let header_id = header.id.clone();
+            let parent_id = header.parent_id.clone();
+            let height = header.height;
+            let n_bits = header.n_bits;
+
+            // Check if we already have this header (skip duplicates)
+            if self.headers.contains(&header_id)? {
+                debug!(height, id = %header_id, "Header already exists, skipping in batch");
+                continue;
+            }
+
+            // Check parent exists (either in batch or database)
+            // Skip check for genesis and first block after genesis
+            let parent_in_batch = if height > 2 {
+                let in_batch = batch_header_ids.contains(parent_id.0.as_ref());
+                let parent_in_db = self.headers.contains(&parent_id)?;
+                if !in_batch && !parent_in_db {
+                    return Err(StateError::HeaderNotFound(format!(
+                        "Parent {} not found for header at height {}",
+                        parent_id, height
+                    )));
+                }
+                in_batch
+            } else {
+                false
+            };
+
+            // Calculate cumulative difficulty
+            // If headers were skipped (duplicates), we need to recalculate from the actual parent
+            let block_difficulty = Self::difficulty_from_nbits(n_bits);
+            let parent_cumulative = if parent_in_batch {
+                // Parent was added in this batch, use running total
+                cumulative_difficulty.clone()
+            } else if height <= 2 {
+                // Genesis or first block - no parent difficulty
+                BigUint::from(0u32)
+            } else {
+                // Parent is in database (possibly because earlier headers were skipped)
+                // Look up the actual cumulative difficulty
+                self.get_cumulative_difficulty(&parent_id)?
+                    .unwrap_or_else(|| BigUint::from(0u32))
+            };
+            cumulative_difficulty = &parent_cumulative + &block_difficulty;
+
+            // Add header to batch using raw bytes
+            self.headers
+                .put_with_bytes_batched(&mut batch, header, raw_bytes);
+
+            // Store cumulative difficulty
+            self.store_cumulative_difficulty(&mut batch, &header_id, &cumulative_difficulty);
+
+            // Track this header for parent lookups within this batch
+            batch_header_ids.insert(header_id.0.as_ref().to_vec());
+
+            // Update final values
+            final_header_id = header_id;
+            final_height = height;
+            final_cumulative_difficulty = cumulative_difficulty.clone();
+        }
+
+        // Determine chain selection based on final cumulative difficulty
+        let current_best_difficulty = self.best_cumulative_difficulty();
+        let current_height = self.best_height();
+
+        let selection = if final_cumulative_difficulty > current_best_difficulty {
+            // Update best header metadata (only for the final header)
+            batch.put(
+                ColumnFamily::Metadata,
+                b"best_header_id",
+                final_header_id.0.as_ref().to_vec(),
+            );
+            batch.put(
+                ColumnFamily::Metadata,
+                b"best_height",
+                final_height.to_be_bytes().to_vec(),
+            );
+            batch.put(
+                ColumnFamily::Metadata,
+                b"best_cumulative_difficulty",
+                final_cumulative_difficulty.to_bytes_be(),
+            );
+
+            // Execute the batch
+            self.storage.write_batch(batch)?;
+
+            // Update in-memory state
+            *self.best_header_id.write() = Some(final_header_id.clone());
+            *self.best_height.write() = final_height;
+            *self.best_cumulative_difficulty.write() = final_cumulative_difficulty.clone();
+
+            if final_height <= current_height && current_height > 0 {
+                // Reorg case - shouldn't happen during initial sync but handle it
+                let fork_height = self.find_fork_height(&final_header_id, current_height)?;
+                let rollback_count = current_height - fork_height;
+
+                warn!(
+                    final_height,
+                    current_height,
+                    fork_height,
+                    rollback_count,
+                    "Chain reorganization in batched header append"
+                );
+
+                ChainSelection::Reorg {
+                    fork_height,
+                    rollback_count,
+                }
+            } else {
+                info!(
+                    first_height,
+                    final_height,
+                    count,
+                    cumulative_difficulty = %final_cumulative_difficulty,
+                    "Batch of {} headers extends chain",
+                    count
+                );
+                ChainSelection::Extended
+            }
+        } else {
+            // Headers don't extend best chain - still store them but don't update metadata
+            self.storage.write_batch(batch)?;
+
+            debug!(
+                first_height,
+                final_height, count, "Batch of {} headers on non-best chain", count
+            );
+            ChainSelection::Ignored
+        };
+
+        Ok(selection)
+    }
+
     /// Find the fork height between a new header and the current best chain.
     fn find_fork_height(&self, new_header_id: &BlockId, _current_height: u32) -> StateResult<u32> {
         // Get the new header to find its height
