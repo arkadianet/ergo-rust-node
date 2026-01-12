@@ -325,12 +325,10 @@ impl AutolykosV2 {
     }
 
     // =====================================================================
-    // Legacy v1 helpers (kept for reference, will be removed after migration)
+    // Autolykos v1 helpers (used for blocks before height 417,792)
     // =====================================================================
 
     /// Calculate seed for v1: H(msg || pk)
-    /// NOTE: This is the v1 algorithm. V2 uses calc_seed_v2 instead.
-    #[allow(dead_code)]
     fn calculate_seed_v1(&self, msg: &[u8], pk: &[u8]) -> [u8; HASH_SIZE] {
         let mut hasher = Blake2b::<typenum::U32>::new();
         Digest::update(&mut hasher, msg);
@@ -339,8 +337,6 @@ impl AutolykosV2 {
     }
 
     /// Generate k indices for v1: idx_i = H(seed || i) mod N
-    /// NOTE: This is the v1 algorithm. V2 uses gen_indexes (sliding window) instead.
-    #[allow(dead_code)]
     fn generate_indices_v1(&self, seed: &[u8], n: u32) -> Vec<u32> {
         let mut indices = Vec::with_capacity(self.k as usize);
 
@@ -415,13 +411,7 @@ impl AutolykosV2 {
         hasher.finalize().into()
     }
 
-    // =====================================================================
-    // Legacy v1 helpers for element/hit calculation
-    // =====================================================================
-
     /// Calculate sum of f values for v1: f(i) = H(i || msg || pk)
-    /// NOTE: This is the v1 algorithm. V2 uses calc_elements_sum instead.
-    #[allow(dead_code)]
     fn calculate_f_sum_v1(&self, indices: &[u32], msg: &[u8], pk: &[u8]) -> Vec<u8> {
         let mut sum = BigUint::from(0u32);
 
@@ -440,8 +430,6 @@ impl AutolykosV2 {
     }
 
     /// Calculate hit for v1: H(f_sum)
-    /// NOTE: This is the v1 algorithm. V2 uses calc_hit instead.
-    #[allow(dead_code)]
     fn calculate_hit_v1(&self, f_sum: &[u8]) -> [u8; HASH_SIZE] {
         let mut hasher = Blake2b::<typenum::U32>::new();
         Digest::update(&mut hasher, f_sum);

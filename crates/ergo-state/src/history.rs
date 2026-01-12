@@ -7,7 +7,7 @@ use crate::{columns, StateError, StateResult};
 use ergo_chain_types::{BlockId, Digest32, Header};
 use ergo_consensus::{
     nbits_to_difficulty, validate_pow, ADProofs, BlockTransactions, ConsensusError, Extension,
-    FullBlock, AUTOLYKOS_V2_ACTIVATION_HEIGHT,
+    FullBlock,
 };
 use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
 use ergo_storage::{ColumnFamily, Storage, WriteBatch};
@@ -16,7 +16,7 @@ use parking_lot::RwLock;
 use sigma_ser::ScorexSerializable;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
-use tracing::{debug, error, info, instrument, warn};
+use tracing::{debug, info, instrument, warn};
 
 /// Ergo voting epoch length (1024 blocks).
 /// Extension blocks at epoch boundaries contain protocol parameters and must be kept.
@@ -562,23 +562,10 @@ impl History {
 
     /// Verify PoW for a header. Returns error if invalid.
     /// Only logs on FAILURE (success is silent).
+    /// Supports both Autolykos v1 (heights < 417,792) and v2 (heights >= 417,792).
     fn verify_pow_for_header(&self, header: &Header) -> StateResult<()> {
         if self.skip_pow_verification() {
             return Ok(());
-        }
-
-        // Fail fast for v1-era blocks (not a PoW failure - v1 verifier not implemented)
-        if header.height < AUTOLYKOS_V2_ACTIVATION_HEIGHT {
-            error!(
-                height = header.height,
-                header_id = %header.id,
-                "MISCONFIGURATION: Autolykos v1 verification not implemented - this is NOT a peer attack"
-            );
-            return Err(StateError::Consensus(ConsensusError::InvalidPow(format!(
-                "Autolykos v1 verifier not implemented for height {}. \
-                 This node requires checkpoint mode or UTXO snapshot for pre-{} blocks.",
-                header.height, AUTOLYKOS_V2_ACTIVATION_HEIGHT
-            ))));
         }
 
         match validate_pow(header) {
