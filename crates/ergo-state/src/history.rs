@@ -5,7 +5,10 @@
 
 use crate::{columns, StateError, StateResult};
 use ergo_chain_types::{BlockId, Digest32, Header};
-use ergo_consensus::{nbits_to_difficulty, ADProofs, BlockTransactions, Extension, FullBlock};
+use ergo_consensus::{
+    nbits_to_difficulty, validate_pow, ADProofs, BlockTransactions, ConsensusError, Extension,
+    FullBlock, AUTOLYKOS_V2_ACTIVATION_HEIGHT,
+};
 use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
 use ergo_storage::{ColumnFamily, Storage, WriteBatch};
 use num_bigint::BigUint;
@@ -13,7 +16,7 @@ use parking_lot::RwLock;
 use sigma_ser::ScorexSerializable;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
-use tracing::{debug, info, instrument, warn};
+use tracing::{debug, error, info, instrument, warn};
 
 /// Ergo voting epoch length (1024 blocks).
 /// Extension blocks at epoch boundaries contain protocol parameters and must be kept.
@@ -536,6 +539,74 @@ impl History {
         }
     }
 
+    // ==================== PoW Verification ====================
+
+    /// Check if PoW verification should be skipped (compile-time feature).
+    fn skip_pow_verification(&self) -> bool {
+        #[cfg(feature = "skip-pow-verification")]
+        {
+            static WARNED: std::sync::Once = std::sync::Once::new();
+            WARNED.call_once(|| {
+                error!("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
+                error!("!!! POW VERIFICATION DISABLED VIA FEATURE FLAG !!!");
+                error!("!!! THIS BUILD IS UNSAFE FOR PRODUCTION USE    !!!");
+                error!("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
+            });
+            true
+        }
+        #[cfg(not(feature = "skip-pow-verification"))]
+        {
+            false
+        }
+    }
+
+    /// Verify PoW for a header. Returns error if invalid.
+    /// Only logs on FAILURE (success is silent).
+    fn verify_pow_for_header(&self, header: &Header) -> StateResult<()> {
+        if self.skip_pow_verification() {
+            return Ok(());
+        }
+
+        // Fail fast for v1-era blocks (not a PoW failure - v1 verifier not implemented)
+        if header.height < AUTOLYKOS_V2_ACTIVATION_HEIGHT {
+            error!(
+                height = header.height,
+                header_id = %header.id,
+                "MISCONFIGURATION: Autolykos v1 verification not implemented - this is NOT a peer attack"
+            );
+            return Err(StateError::Consensus(ConsensusError::InvalidPow(format!(
+                "Autolykos v1 verifier not implemented for height {}. \
+                 This node requires checkpoint mode or UTXO snapshot for pre-{} blocks.",
+                header.height, AUTOLYKOS_V2_ACTIVATION_HEIGHT
+            ))));
+        }
+
+        match validate_pow(header) {
+            Ok(true) => Ok(()), // Success is silent
+            Ok(false) => {
+                warn!(
+                    height = header.height,
+                    header_id = %header.id,
+                    n_bits = header.n_bits,
+                    "PoW solution does not meet declared target"
+                );
+                Err(StateError::Consensus(ConsensusError::InvalidPow(format!(
+                    "PoW below target at height {}",
+                    header.height
+                ))))
+            }
+            Err(e) => {
+                warn!(
+                    height = header.height,
+                    header_id = %header.id,
+                    error = %e,
+                    "Malformed PoW solution"
+                );
+                Err(StateError::Consensus(e))
+            }
+        }
+    }
+
     // ==================== Pruning Methods ====================
 
     /// Get the minimal full block height.
@@ -708,8 +779,10 @@ impl History {
 
     /// Calculate difficulty from nBits (compact target representation).
     fn difficulty_from_nbits(n_bits: u32) -> BigUint {
-        // The difficulty is the ratio of the maximum target to the current target
-        nbits_to_difficulty(n_bits)
+        // The difficulty is decoded from compact format.
+        // If decoding fails (malformed n_bits), return 1 to avoid panic
+        // but not give undue cumulative difficulty credit.
+        nbits_to_difficulty(n_bits).unwrap_or_else(|_| BigUint::from(1u32))
     }
 
     /// Append a new header.
@@ -749,6 +822,9 @@ impl History {
         if height > 2 && !self.headers.contains(&parent_id)? {
             return Err(StateError::HeaderNotFound(format!("{}", parent_id)));
         }
+
+        // Verify PoW - reject invalid headers before storing
+        self.verify_pow_for_header(&header)?;
 
         // Calculate cumulative difficulty for this header
         let block_difficulty = Self::difficulty_from_nbits(n_bits);
@@ -1063,6 +1139,9 @@ impl History {
         let height = block.height();
         let header = block.header.clone();
 
+        // Verify PoW - reject invalid blocks before storing
+        self.verify_pow_for_header(&header)?;
+
         // Create a single batch for ALL block data
         let mut batch = WriteBatch::new();
 
@@ -1171,6 +1250,9 @@ impl History {
     ) -> StateResult<BigUint> {
         let block_id = block.id();
         let header = &block.header;
+
+        // Verify PoW - reject invalid blocks before adding to batch
+        self.verify_pow_for_header(header)?;
 
         // Add header to batch
         self.headers.put_batched(batch, header)?;

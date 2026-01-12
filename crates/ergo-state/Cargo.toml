@@ -44,6 +44,12 @@ blake2.workspace = true
 # Math
 num-bigint.workspace = true
 
+[features]
+default = []
+# DANGEROUS: Disables PoW verification - for testing only!
+# This allows the node to accept headers without verifying Proof-of-Work.
+skip-pow-verification = []
+
 [dev-dependencies]
 tempfile = "3"
 tokio = { workspace = true, features = ["test-util"] }

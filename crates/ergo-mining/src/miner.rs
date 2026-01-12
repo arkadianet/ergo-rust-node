@@ -179,13 +179,15 @@ impl Miner {
             .ok_or_else(|| MiningError::InvalidSolution("No current candidate".to_string()))?;
 
         // Get difficulty target
-        let target = nbits_to_target(candidate.n_bits);
+        let target = nbits_to_target(candidate.n_bits)
+            .map_err(|e| MiningError::Other(format!("Invalid n_bits: {}", e)))?;
 
         // Verify solution
         let valid = self.autolykos.verify_solution(
             &candidate.header_bytes,
             &solution,
             &target,
+            candidate.version,
             candidate.height,
         )?;
 
@@ -330,6 +332,7 @@ impl Miner {
             let task = MiningTask {
                 header_bytes: candidate.header_bytes.clone(),
                 n_bits: candidate.n_bits,
+                version: candidate.version,
                 height: candidate.height,
                 miner_pk: Box::new(miner_pk.clone()),
                 created_at: candidate.timestamp,

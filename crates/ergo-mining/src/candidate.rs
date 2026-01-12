@@ -17,6 +17,8 @@ pub struct BlockCandidate {
     pub parent_id: Option<BlockId>,
     /// Block height.
     pub height: u32,
+    /// Block version.
+    pub version: u8,
     /// Timestamp.
     pub timestamp: u64,
     /// Difficulty target (nBits).
@@ -88,7 +90,18 @@ impl CandidateGenerator {
 
         // Get current state
         let (_utxo_height, header_height) = self.state.heights();
-        let best_header = self.state.history.best_header_id();
+        let best_header_id = self.state.history.best_header_id();
+        // Get version from parent header, or default to v1 for genesis-era
+        let parent_version = match self.state.history.best_header() {
+            Ok(Some(header)) => header.version,
+            Ok(None) => 1, // No parent header: default to genesis-era version
+            Err(e) => {
+                return Err(MiningError::Other(format!(
+                    "Failed to get best header: {}",
+                    e
+                )))
+            }
+        };
         let state_root = self.state.utxo.state_root();
         let new_height = header_height + 1;
 
@@ -123,7 +136,7 @@ impl CandidateGenerator {
 
         // Serialize header for mining
         let header_bytes = self.serialize_header_for_mining(
-            best_header.as_ref(),
+            best_header_id.as_ref(),
             new_height,
             timestamp,
             n_bits,
@@ -133,8 +146,9 @@ impl CandidateGenerator {
         );
 
         let candidate = BlockCandidate {
-            parent_id: best_header,
+            parent_id: best_header_id,
             height: new_height,
+            version: parent_version,
             timestamp,
             n_bits,
             transactions_root,

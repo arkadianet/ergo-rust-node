@@ -28,6 +28,10 @@ pub enum MiningError {
     /// Mempool error.
     #[error("Mempool error: {0}")]
     Mempool(#[from] ergo_mempool::MempoolError),
+
+    /// Other error.
+    #[error("{0}")]
+    Other(String),
 }
 
 /// Result type for mining operations.
