@@ -515,6 +515,16 @@ impl StateManager {
         self.history.headers.get_range(from_height, count)
     }
 
+    /// Get header IDs in a range without loading full headers.
+    /// This is much more memory efficient for bulk operations.
+    pub fn get_header_ids(
+        &self,
+        from_height: u32,
+        count: u32,
+    ) -> StateResult<Vec<ergo_chain_types::BlockId>> {
+        self.history.headers.get_ids_range(from_height, count)
+    }
+
     /// Check if we have a header.
     pub fn has_header(&self, id: &ergo_chain_types::BlockId) -> StateResult<bool> {
         self.history.headers.contains(id)

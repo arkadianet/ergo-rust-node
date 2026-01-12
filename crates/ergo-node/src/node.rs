@@ -366,15 +366,22 @@ impl Node {
             // Set the synchronizer's height to our stored header height
             sync_protocol.set_height(header_height);
 
-            // Load ALL stored header IDs so sync protocol knows what we already have
-            match self.state.get_headers(1, header_height) {
-                Ok(headers) if !headers.is_empty() => {
+            // Only load the most recent 50,000 header IDs (matching STORED_HEADERS_CACHE_SIZE in protocol.rs)
+            // This is much more memory efficient than loading all headers
+            const HEADER_IDS_TO_LOAD: u32 = 50_000;
+            let start_height = header_height.saturating_sub(HEADER_IDS_TO_LOAD).max(1);
+            let count = header_height - start_height + 1;
+
+            match self.state.get_header_ids(start_height, count) {
+                Ok(header_ids) if !header_ids.is_empty() => {
                     info!(
-                        "Loading {} stored headers into sync protocol",
-                        headers.len()
+                        "Loading {} recent header IDs into sync protocol (heights {}-{})",
+                        header_ids.len(),
+                        start_height,
+                        header_height
                     );
                     let all_header_ids: Vec<Vec<u8>> =
-                        headers.iter().map(|h| h.id.0.as_ref().to_vec()).collect();
+                        header_ids.iter().map(|id| id.0.as_ref().to_vec()).collect();
 
                     // Get exponentially spaced locator for SyncInfo messages
                     let locator_ids = match self.state.get_header_locator() {
@@ -392,14 +399,19 @@ impl Node {
                     // Get headers at V2 SyncInfo offsets: [0, 16, 128, 512] from best height
                     // These are sent in newest-first order (offset 0 = best header first)
                     // The Scala node uses these specific offsets for commonPoint detection
+                    // Only load the specific headers we need (4 headers max)
                     const V2_SYNC_OFFSETS: [u32; 4] = [0, 16, 128, 512];
                     let v2_headers: Vec<_> = V2_SYNC_OFFSETS
                         .iter()
                         .filter_map(|offset| {
                             let target_height = header_height.saturating_sub(*offset);
                             if target_height > 0 {
-                                // Find header at this height in our loaded headers
-                                headers.iter().find(|h| h.height == target_height).cloned()
+                                // Load only the specific header we need
+                                self.state
+                                    .get_headers(target_height, 1)
+                                    .ok()?
+                                    .into_iter()
+                                    .next()
                             } else {
                                 None
                             }
@@ -421,7 +433,7 @@ impl Node {
                     );
                 }
                 Err(e) => {
-                    warn!("Failed to get headers from storage: {}", e);
+                    warn!("Failed to get header IDs from storage: {}", e);
                 }
             }
         }
@@ -1499,10 +1511,14 @@ impl Node {
 
     /// Periodic tick.
     async fn tick(&self) {
-        // Log stats periodically
-        static COUNTER: AtomicBool = AtomicBool::new(false);
+        use std::sync::atomic::AtomicU64;
 
-        if !COUNTER.swap(true, Ordering::SeqCst) {
+        // Tick counter for periodic logging
+        static TICK_COUNT: AtomicU64 = AtomicU64::new(0);
+        let tick = TICK_COUNT.fetch_add(1, Ordering::Relaxed);
+
+        // Log node status every 30 seconds
+        if tick % 30 == 0 {
             let (utxo_height, header_height) = self.state.heights();
             let mempool_stats = self.mempool.stats();
             let peer_count = self.peers.connected_count();
@@ -1514,6 +1530,11 @@ impl Node {
                 peers = peer_count,
                 "Node status"
             );
+        }
+
+        // Log RocksDB memory stats every 60 seconds
+        if tick % 60 == 0 {
+            self.storage.log_memory_stats();
         }
     }
 
