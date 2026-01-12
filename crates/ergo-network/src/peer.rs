@@ -290,6 +290,22 @@ impl PeerManager {
         info!(addr = %addr, "Unbanned peer");
     }
 
+    /// Clean up expired bans to free memory.
+    /// This should be called periodically (e.g., every 60 seconds).
+    pub fn cleanup_expired_bans(&self) {
+        let now = Instant::now();
+        let before = self.banned.len();
+        self.banned.retain(|_, unban_time| *unban_time > now);
+        let removed = before - self.banned.len();
+        if removed > 0 {
+            debug!(
+                removed,
+                remaining = self.banned.len(),
+                "Cleaned up expired bans"
+            );
+        }
+    }
+
     /// Get connected peer count.
     pub fn connected_count(&self) -> usize {
         self.connected.read().len()
