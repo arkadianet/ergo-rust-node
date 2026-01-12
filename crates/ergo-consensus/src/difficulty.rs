@@ -144,22 +144,22 @@ impl DifficultyAdjustment {
 
         // Get current difficulty and apply adjustment
         let current_nbits = headers.last().unwrap().n_bits;
-        let current_target = crate::nbits_to_target(current_nbits);
+        let current_diff = crate::nbits_to_difficulty(current_nbits)?;
 
-        // Adjust target (higher target = lower difficulty)
-        // If blocks are too slow (slope > target), we lower difficulty (increase target)
-        // If blocks are too fast (slope < target), we raise difficulty (decrease target)
-        let new_target = if clamped > 1.0 {
-            // Blocks too fast, decrease target (increase difficulty)
-            let divisor = (clamped * 1000.0) as u64;
-            &current_target * 1000u64 / divisor
+        // Adjust difficulty
+        // If blocks are too fast (clamped > 1), increase difficulty
+        // If blocks are too slow (clamped < 1), decrease difficulty
+        let new_diff = if clamped > 1.0 {
+            // Blocks too fast, increase difficulty
+            let multiplier = (clamped * 1000.0) as u64;
+            &current_diff * multiplier / 1000u64
         } else {
-            // Blocks too slow, increase target (decrease difficulty)
-            let multiplier = (1000.0 / clamped) as u64;
-            &current_target * multiplier / 1000u64
+            // Blocks too slow, decrease difficulty
+            let divisor = (1000.0 / clamped) as u64;
+            &current_diff * 1000u64 / divisor
         };
 
-        Ok(crate::target_to_nbits(&new_target))
+        Ok(crate::difficulty_to_nbits(&new_diff))
     }
 }
 
@@ -258,14 +258,14 @@ mod tests {
         }
 
         let result = adj.calculate_next_difficulty(&headers, 128).unwrap();
-        let original_target = crate::nbits_to_target(0x1d00ffff);
-        let new_target = crate::nbits_to_target(result);
+        let original_diff = crate::nbits_to_difficulty(0x1d00ffff).unwrap();
+        let new_diff = crate::nbits_to_difficulty(result).unwrap();
 
-        // When blocks are too fast, difficulty increases (target decreases)
+        // When blocks are too fast, difficulty increases
         // Note: due to clamping, the change might be limited
         assert!(
-            new_target <= original_target,
-            "Target should decrease (difficulty increase) when blocks are too fast"
+            new_diff >= original_diff,
+            "Difficulty should increase when blocks are too fast"
         );
     }
 
@@ -284,13 +284,13 @@ mod tests {
         }
 
         let result = adj.calculate_next_difficulty(&headers, 128).unwrap();
-        let original_target = crate::nbits_to_target(0x1d00ffff);
-        let new_target = crate::nbits_to_target(result);
+        let original_diff = crate::nbits_to_difficulty(0x1d00ffff).unwrap();
+        let new_diff = crate::nbits_to_difficulty(result).unwrap();
 
-        // When blocks are too slow, difficulty decreases (target increases)
+        // When blocks are too slow, difficulty decreases
         assert!(
-            new_target >= original_target,
-            "Target should increase (difficulty decrease) when blocks are too slow"
+            new_diff <= original_diff,
+            "Difficulty should decrease when blocks are too slow"
         );
     }
 
@@ -312,15 +312,15 @@ mod tests {
         let result = adj.calculate_next_difficulty(&headers, 128).unwrap();
 
         // The change should be clamped, not unlimited
-        // MAX_DIFFICULTY_CHANGE is typically 2.0, so target can only halve or double
-        let original_target = crate::nbits_to_target(0x1d00ffff);
-        let new_target = crate::nbits_to_target(result);
+        // MAX_DIFFICULTY_CHANGE is typically 2.0, so difficulty can only double or halve
+        let original_diff = crate::nbits_to_difficulty(0x1d00ffff).unwrap();
+        let new_diff = crate::nbits_to_difficulty(result).unwrap();
 
-        // Even with 12x speed difference, the target should only change by max factor
-        let ratio = if original_target > new_target {
-            &original_target / &new_target
+        // Even with 12x speed difference, the difficulty should only change by max factor
+        let ratio = if new_diff > original_diff {
+            &new_diff / &original_diff
         } else {
-            &new_target / &original_target
+            &original_diff / &new_diff
         };
 
         assert!(

@@ -32,8 +32,11 @@ pub mod reemission;
 pub mod tx_validation;
 mod validation;
 
+#[cfg(test)]
+mod pow_test_vectors;
+
 pub use autolykos::{
-    nbits_to_difficulty, nbits_to_target, target_to_nbits, validate_pow, AutolykosSolution,
+    difficulty_to_nbits, nbits_to_difficulty, nbits_to_target, validate_pow, AutolykosSolution,
     AutolykosV2,
 };
 pub use block::{
@@ -49,6 +52,7 @@ pub use cost::{
 };
 pub use difficulty::{calculate_required_difficulty, DifficultyAdjustment, HeaderForDifficulty};
 pub use error::{ConsensusError, ConsensusResult};
+pub use params::AUTOLYKOS_V2_ACTIVATION_HEIGHT;
 pub use validation::{BlockValidator, HeaderValidator, TransactionValidator};
 
 /// Ergo network parameters.
@@ -74,8 +78,27 @@ pub mod params {
     /// Block version for Autolykos v2 (version 2+).
     pub const AUTOLYKOS_V2_VERSION: u8 = 2;
 
-    /// Height at which Autolykos v2 N parameter increased from 2^25 to 2^26.
-    pub const AUTOLYKOS_N_V2_HARDFORK_HEIGHT: u32 = 614_400;
+    /// Height at which the 5% N-growth schedule begins (mainnet).
+    /// This is 600 * 1024 = 614,400.
+    /// MAINNET ONLY. For testnet/devnet, this should be loaded from chain config.
+    pub const AUTOLYKOS_N_V2_HARDFORK_HEIGHT: u32 = 600 * 1024;
+
+    /// Alias for N-growth start height, derived from AUTOLYKOS_N_V2_HARDFORK_HEIGHT.
+    pub const N_INCREASE_START: u32 = AUTOLYKOS_N_V2_HARDFORK_HEIGHT;
+
+    /// N increases by 5% every this many blocks after N_INCREASE_START.
+    /// This is 50 * 1024 = 51,200 blocks.
+    /// MAINNET ONLY. For testnet/devnet, this should be loaded from chain config.
+    pub const N_INCREASE_PERIOD: u32 = 50 * 1024;
+
+    /// Maximum height at which N stops growing.
+    /// MAINNET ONLY. For testnet/devnet, this should be loaded from chain config.
+    pub const N_MAX_HEIGHT: u32 = 4_198_400;
+
+    /// Autolykos v2 activation height (mainnet).
+    /// This is MAINNET ONLY. For testnet/devnet, this should be loaded from chain config.
+    /// If running testnet with checkpoints disabled, the v1 guardrail will trigger incorrectly.
+    pub const AUTOLYKOS_V2_ACTIVATION_HEIGHT: u32 = 417_792;
 
     /// Maximum block size in bytes.
     pub const MAX_BLOCK_SIZE: usize = 1_048_576; // 1MB
