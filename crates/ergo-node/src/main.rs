@@ -47,13 +47,13 @@ pub struct Args {
     #[arg(long)]
     mining_address: Option<String>,
 
-    /// API bind address
-    #[arg(long, default_value = "127.0.0.1:9053")]
-    api_bind: String,
+    /// API bind address (overrides config file if specified)
+    #[arg(long)]
+    api_bind: Option<String>,
 
-    /// P2P bind address
-    #[arg(long, default_value = "0.0.0.0:9030")]
-    p2p_bind: String,
+    /// P2P bind address (overrides config file if specified)
+    #[arg(long)]
+    p2p_bind: Option<String>,
 
     /// Log level
     #[arg(long, default_value = "info")]

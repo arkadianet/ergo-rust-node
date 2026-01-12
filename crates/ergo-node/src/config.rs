@@ -171,8 +171,15 @@ impl NodeConfig {
         }
 
         config.network = args.network.clone();
-        config.network_config.bind_address = args.p2p_bind.clone();
-        config.api.bind_address = args.api_bind.clone();
+
+        // Only override if explicitly provided via CLI
+        if let Some(ref p2p_bind) = args.p2p_bind {
+            config.network_config.bind_address = p2p_bind.clone();
+        }
+        if let Some(ref api_bind) = args.api_bind {
+            config.api.bind_address = api_bind.clone();
+        }
+
         config.mining.enabled = args.mining;
 
         // Internal mining implies mining is enabled
