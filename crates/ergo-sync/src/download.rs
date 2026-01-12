@@ -101,27 +101,45 @@ impl BlockDownloader {
     /// Add tasks to download queue.
     /// Skips tasks that are already completed, pending, or in-flight.
     pub fn queue(&self, tasks: Vec<DownloadTask>) {
+        self.queue_inner(tasks, false)
+    }
+
+    /// Add tasks to download queue, optionally forcing re-download of completed blocks.
+    /// Use force=true when blocks need to be re-downloaded (e.g., after detecting stale state).
+    pub fn queue_force(&self, tasks: Vec<DownloadTask>) {
+        self.queue_inner(tasks, true)
+    }
+
+    fn queue_inner(&self, tasks: Vec<DownloadTask>, force: bool) {
         let mut pending = self.pending.write();
         let in_flight = self.in_flight.read();
-        let completed = self.completed.read();
+        let mut completed = self.completed.write();
         let mut added = 0;
+        let mut forced = 0;
         for task in tasks {
-            // Skip if already completed, pending, or in-flight
-            if completed.contains(&task.id) {
-                continue;
-            }
+            // Skip if already pending or in-flight
             if in_flight.contains_key(&task.id) {
                 continue;
             }
             if pending.contains_key(&task.id) {
                 continue;
             }
+            // Check completed - if force is true, remove from completed and re-queue
+            if completed.contains(&task.id) {
+                if force {
+                    completed.remove(&task.id);
+                    forced += 1;
+                } else {
+                    continue;
+                }
+            }
             pending.insert(task.id.clone(), task);
             added += 1;
         }
-        if added > 0 {
+        if added > 0 || forced > 0 {
             debug!(
                 added,
+                forced,
                 total_pending = pending.len(),
                 "Tasks queued for download"
             );

@@ -76,6 +76,14 @@ pub enum SyncCommand {
         /// Peer that sent this transaction (for rebroadcast exclusion).
         from_peer: PeerId,
     },
+    /// Store multiple headers in a single batched write operation.
+    /// This is significantly more efficient than storing headers individually.
+    StoreHeadersBatch {
+        /// Headers with their raw bytes, in ascending height order.
+        headers: Vec<(Header, Vec<u8>)>,
+        /// Response channel for confirmation.
+        response_tx: tokio::sync::oneshot::Sender<Result<(), String>>,
+    },
 }
 
 /// Events that the sync service receives.
@@ -194,6 +202,12 @@ const MAX_V2_HEADERS: usize = 10;
 /// V2 SyncInfo offsets from best height (matches Scala node's FullV2SyncOffsets).
 const V2_SYNC_OFFSETS: [u32; 4] = [0, 16, 128, 512];
 
+/// Maximum number of headers to buffer before flushing to storage.
+const HEADER_BATCH_SIZE: usize = 200;
+
+/// Maximum time to buffer headers before flushing (milliseconds).
+const HEADER_BATCH_TIMEOUT_MS: u64 = 500;
+
 /// Sync protocol handler.
 pub struct SyncProtocol {
     /// Synchronizer state.
@@ -224,6 +238,27 @@ pub struct SyncProtocol {
     /// Transaction IDs we've already processed (to avoid re-requesting).
     /// Uses LRU cache to automatically evict oldest entries when capacity is exceeded.
     known_transactions: parking_lot::Mutex<lru::LruCache<Vec<u8>, ()>>,
+    /// Buffer for headers pending batched write to storage.
+    /// Headers are accumulated here and flushed in batches for efficiency.
+    pending_header_writes: RwLock<Vec<(Header, Vec<u8>)>>,
+    /// Timestamp when the first header was added to pending_header_writes.
+    /// Used to trigger timeout-based flushing.
+    pending_header_writes_since: RwLock<Option<std::time::Instant>>,
+}
+
+/// Peer chain status relative to ours.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PeerChainStatus {
+    /// Unknown status (initial state).
+    Unknown,
+    /// Peer is on a shorter chain than us.
+    Younger,
+    /// Peer is on a longer chain than us.
+    Older,
+    /// Peer is on a forked chain.
+    Fork,
+    /// Peer is on the same chain as us.
+    Equal,
 }
 
 /// Per-peer sync state.
@@ -241,10 +276,18 @@ struct PeerSyncState {
     last_sync_sent: std::time::Instant,
     /// Last time we sent a modifier request to this peer.
     last_request_sent: std::time::Instant,
+    /// Last time we received SyncInfo from this peer.
+    last_sync_received: std::time::Instant,
+    /// Chain status relative to ours.
+    chain_status: PeerChainStatus,
 }
 
 /// Minimum interval between SyncInfo messages to the same peer (20 seconds like Scala node).
 const MIN_SYNC_INTERVAL: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// Minimum interval between processing SyncInfo from the same peer (100ms like Scala node).
+/// This prevents resource exhaustion from spammy peers.
+const PER_PEER_SYNC_LOCK_TIME: std::time::Duration = std::time::Duration::from_millis(100);
 
 /// Minimum interval between modifier requests to the same peer.
 /// The Scala node doesn't have explicit per-request throttling, but has deliveryTimeout = 10s.
@@ -266,12 +309,42 @@ impl PeerSyncState {
             last_activity: std::time::Instant::now(),
             last_sync_sent: epoch,
             last_request_sent: epoch,
+            last_sync_received: epoch,
+            chain_status: PeerChainStatus::Unknown,
         }
     }
 
     /// Check if we can send SyncInfo to this peer (respecting MIN_SYNC_INTERVAL).
     fn can_send_sync(&self) -> bool {
         self.last_sync_sent.elapsed() >= MIN_SYNC_INTERVAL
+    }
+
+    /// Check if we should process SyncInfo from this peer (respecting PER_PEER_SYNC_LOCK_TIME).
+    /// Returns true if enough time has passed since last SyncInfo from this peer.
+    fn can_process_sync(&self) -> bool {
+        self.last_sync_received.elapsed() >= PER_PEER_SYNC_LOCK_TIME
+    }
+
+    /// Check if we should send SyncInfo response based on status change and conditions.
+    /// Matches Scala node logic: send if status changed, peer is outdated, or we're older/fork.
+    fn should_send_sync_response(
+        &self,
+        old_status: PeerChainStatus,
+        new_status: PeerChainStatus,
+    ) -> bool {
+        // Send if status changed
+        if old_status != new_status {
+            return true;
+        }
+        // Send if we're older or on a fork (we need their headers)
+        if new_status == PeerChainStatus::Older || new_status == PeerChainStatus::Fork {
+            return true;
+        }
+        // Send if peer hasn't received sync from us in a while
+        if self.last_sync_sent.elapsed() >= MIN_SYNC_INTERVAL {
+            return true;
+        }
+        false
     }
 
     /// Check if we can send a modifier request to this peer (respecting MIN_REQUEST_INTERVAL).
@@ -309,6 +382,8 @@ impl SyncProtocol {
             known_transactions: parking_lot::Mutex::new(lru::LruCache::new(
                 std::num::NonZeroUsize::new(10_000).unwrap(),
             )),
+            pending_header_writes: RwLock::new(Vec::new()),
+            pending_header_writes_since: RwLock::new(None),
         }
     }
 
@@ -499,6 +574,23 @@ impl SyncProtocol {
 
     /// Handle received SyncInfo.
     async fn on_sync_info(&self, peer: PeerId, info: SyncInfo) -> SyncResult<()> {
+        // Rate limit: Check if we received SyncInfo from this peer too recently
+        // This prevents resource exhaustion from spammy peers (matches Scala's PerPeerSyncLockTime)
+        let (can_process, old_status) = {
+            let peers = self.sync_peers.read();
+            if let Some(state) = peers.get(&peer) {
+                (state.can_process_sync(), state.chain_status)
+            } else {
+                // Unknown peer, allow processing
+                (true, PeerChainStatus::Unknown)
+            }
+        };
+
+        if !can_process {
+            debug!(peer = %peer, "Ignoring spammy SyncInfo (too frequent)");
+            return Ok(());
+        }
+
         // Get header IDs and peer height from either V1 or V2 format
         let (header_ids, peer_height): (Vec<Vec<u8>>, Option<u32>) = if info.is_v2() {
             // V2 format contains full serialized headers - parse them to get height
@@ -529,30 +621,59 @@ impl SyncProtocol {
         // Determine peer height - use parsed height from V2, or keep existing for V1
         // For V1, we can't know the exact height from just IDs, so we preserve
         // any previously known height (which gets updated as we receive headers)
-        let estimated_height = peer_height.unwrap_or_else(|| {
-            // For V1, check if we already have a height for this peer
-            let existing_height = self
-                .sync_peers
-                .read()
-                .get(&peer)
-                .map(|s| s.height)
-                .unwrap_or(0);
+        let existing_height = self
+            .sync_peers
+            .read()
+            .get(&peer)
+            .map(|s| s.height)
+            .unwrap_or(0);
 
-            if existing_height > 0 {
-                existing_height
-            } else if !header_ids.is_empty() {
-                // Peer has headers but we don't know height yet
-                // Use 0 - will be updated when we receive actual headers
-                0
+        let estimated_height = peer_height.unwrap_or(existing_height);
+
+        // Determine the new chain status by comparing our height with peer's
+        let our_height = self
+            .header_chain
+            .read()
+            .headers
+            .back()
+            .map(|h| h.height)
+            .unwrap_or(0);
+
+        let new_status = if estimated_height == 0 && our_height == 0 {
+            PeerChainStatus::Unknown
+        } else if estimated_height > our_height {
+            PeerChainStatus::Older // We are older (behind)
+        } else if estimated_height < our_height {
+            PeerChainStatus::Younger // Peer is younger (behind us)
+        } else {
+            // Same height - check if we share headers
+            let our_headers = self.our_best_headers.read();
+            let shared = header_ids.iter().any(|h| our_headers.contains(h));
+            if shared {
+                PeerChainStatus::Equal
             } else {
-                0
+                PeerChainStatus::Fork
             }
-        });
+        };
 
+        // Determine if we should send SyncInfo response
+        let should_send_sync = {
+            let peers = self.sync_peers.read();
+            if let Some(state) = peers.get(&peer) {
+                state.should_send_sync_response(old_status, new_status)
+            } else {
+                // New peer, always respond
+                true
+            }
+        };
+
+        // Update peer state
         if let Some(state) = self.sync_peers.write().get_mut(&peer) {
             state.best_headers = header_ids.clone();
             state.last_activity = std::time::Instant::now();
+            state.last_sync_received = std::time::Instant::now();
             state.height = estimated_height;
+            state.chain_status = new_status;
         }
 
         // Update synchronizer with peer height
@@ -581,21 +702,43 @@ impl SyncProtocol {
             );
         }
 
-        // Respond with V2 SyncInfo so the peer knows our height
-        // This ensures they respond with V2 as well, giving us their height
-        let sync_info = self.build_v2_sync_info();
+        // Only respond with SyncInfo if necessary (matches Scala node behavior)
+        // This prevents ping-pong where both nodes keep responding to each other
+        if should_send_sync {
+            let sync_info = self.build_v2_sync_info();
 
-        if sync_info.is_v2() {
-            debug!(
-                "Responding to SyncInfo with V2 ({} headers)",
-                sync_info.last_headers.len()
-            );
+            if sync_info.is_v2() {
+                debug!(
+                    peer = %peer,
+                    old_status = ?old_status,
+                    new_status = ?new_status,
+                    "Responding to SyncInfo with V2 ({} headers)",
+                    sync_info.last_headers.len()
+                );
+            } else {
+                debug!(
+                    peer = %peer,
+                    old_status = ?old_status,
+                    new_status = ?new_status,
+                    "Responding to SyncInfo with V1 (no headers yet)"
+                );
+            }
+
+            // Update last_sync_sent
+            if let Some(state) = self.sync_peers.write().get_mut(&peer) {
+                state.last_sync_sent = std::time::Instant::now();
+            }
+
+            self.send_to_peer(&peer, Message::SyncInfo(sync_info))
+                .await?;
         } else {
-            debug!("Responding to SyncInfo with V1 (no headers yet)");
+            debug!(
+                peer = %peer,
+                old_status = ?old_status,
+                new_status = ?new_status,
+                "Not responding to SyncInfo (no change needed)"
+            );
         }
-
-        self.send_to_peer(&peer, Message::SyncInfo(sync_info))
-            .await?;
 
         Ok(())
     }
@@ -915,7 +1058,111 @@ impl SyncProtocol {
         Ok(())
     }
 
+    /// Buffer a header for batched storage.
+    /// Headers are accumulated and flushed in batches for efficiency.
+    fn buffer_header_for_storage(&self, header: &Header, raw_bytes: &[u8]) {
+        let mut pending = self.pending_header_writes.write();
+        let mut since = self.pending_header_writes_since.write();
+
+        // Set timestamp if this is the first header in the batch
+        if pending.is_empty() {
+            *since = Some(std::time::Instant::now());
+        }
+
+        pending.push((header.clone(), raw_bytes.to_vec()));
+    }
+
+    /// Check if we should flush buffered headers (size or timeout).
+    fn should_flush_headers(&self) -> bool {
+        let pending = self.pending_header_writes.read();
+        if pending.is_empty() {
+            return false;
+        }
+
+        // Flush if we've reached batch size
+        if pending.len() >= HEADER_BATCH_SIZE {
+            return true;
+        }
+
+        // Flush if timeout has elapsed
+        let since = self.pending_header_writes_since.read();
+        if let Some(start) = *since {
+            if start.elapsed().as_millis() as u64 >= HEADER_BATCH_TIMEOUT_MS {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    /// Flush buffered headers to storage in a single batch.
+    /// Returns the list of header IDs that were stored.
+    async fn flush_pending_headers_to_storage(&self) -> SyncResult<Vec<Vec<u8>>> {
+        // Take the buffered headers
+        let headers: Vec<(Header, Vec<u8>)> = {
+            let mut pending = self.pending_header_writes.write();
+            let mut since = self.pending_header_writes_since.write();
+            *since = None;
+            std::mem::take(&mut *pending)
+        };
+
+        if headers.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let count = headers.len();
+        let first_height = headers[0].0.height;
+        let last_height = headers[count - 1].0.height;
+
+        info!(
+            first_height,
+            last_height, count, "Flushing {} buffered headers to storage", count
+        );
+
+        // Collect header IDs before sending (we need them for tracking)
+        let header_ids: Vec<Vec<u8>> = headers
+            .iter()
+            .map(|(h, _)| h.id.0.as_ref().to_vec())
+            .collect();
+
+        // Create response channel
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+
+        // Send batched store command
+        let cmd = SyncCommand::StoreHeadersBatch {
+            headers,
+            response_tx,
+        };
+        self.command_tx.send(cmd).await.map_err(|e| {
+            SyncError::Internal(format!("Failed to send batch store command: {}", e))
+        })?;
+
+        // Wait for storage confirmation
+        match response_rx.await {
+            Ok(Ok(())) => {
+                info!(
+                    first_height,
+                    last_height, count, "Batch of {} headers stored successfully", count
+                );
+            }
+            Ok(Err(e)) => {
+                return Err(SyncError::Internal(format!(
+                    "Failed to store header batch: {}",
+                    e
+                )));
+            }
+            Err(_) => {
+                return Err(SyncError::Internal(
+                    "Batch storage response channel closed".to_string(),
+                ));
+            }
+        }
+
+        Ok(header_ids)
+    }
+
     /// Store a header and any pending descendants that can now be applied.
+    /// Headers are buffered and written in batches for efficiency.
     async fn store_header_and_descendants(
         &self,
         header: Header,
@@ -924,41 +1171,16 @@ impl SyncProtocol {
         let header_id = header.id.0.as_ref().to_vec();
         let height = header.height;
 
-        info!(id = hex::encode(&header_id), height, "Storing header");
+        debug!(
+            id = hex::encode(&header_id),
+            height, "Buffering header for storage"
+        );
 
-        // Create response channel for synchronous storage confirmation
-        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+        // Buffer the header for batched storage
+        self.buffer_header_for_storage(&header, &raw_bytes);
 
-        // Send command to store the header with raw bytes for correct ID preservation
-        let cmd = SyncCommand::StoreHeader {
-            header: header.clone(),
-            raw_bytes,
-            response_tx,
-        };
-        self.command_tx
-            .send(cmd)
-            .await
-            .map_err(|e| SyncError::Internal(format!("Failed to send store command: {}", e)))?;
-
-        // Wait for storage confirmation
-        match response_rx.await {
-            Ok(Ok(())) => {
-                debug!(height, "Header storage confirmed");
-            }
-            Ok(Err(e)) => {
-                return Err(SyncError::Internal(format!(
-                    "Failed to store header: {}",
-                    e
-                )));
-            }
-            Err(_) => {
-                return Err(SyncError::Internal(
-                    "Storage response channel closed".to_string(),
-                ));
-            }
-        }
-
-        // Mark as stored (only after confirmation)
+        // Optimistically mark as stored so descendants can be processed
+        // This is safe because if the batch write fails, we'll error out anyway
         self.stored_headers.write().insert(header_id.clone());
 
         // Compute the BlockTransactions ID (derived from header ID + transactions root)
@@ -1001,6 +1223,11 @@ impl SyncProtocol {
 
         // Check if any pending headers can now be applied
         self.try_apply_pending_headers(&header_id).await?;
+
+        // Check if we should flush buffered headers to storage
+        if self.should_flush_headers() {
+            self.flush_pending_headers_to_storage().await?;
+        }
 
         // Note: We don't request more headers here anymore.
         // The tick handler will request more when appropriate.
@@ -1243,7 +1470,13 @@ impl SyncProtocol {
         if let Some(tx_id) = tx_id_to_remove {
             chain.missing_blocks.retain(|id| id != &tx_id);
             chain.tx_id_to_header_id.remove(&tx_id);
+            // Also remove from downloader's completed set to free memory
+            // and allow re-downloading if ever needed (e.g., after rollback)
+            self.downloader.uncomplete(&tx_id);
         }
+
+        // Also remove the header_id itself from completed (in case it was tracked that way)
+        self.downloader.uncomplete(block_id);
 
         // Log memory stats periodically (every 1000 blocks)
         if height % 1000 == 0 {
@@ -1319,22 +1552,41 @@ impl SyncProtocol {
             tasks.push(task);
         }
 
-        // Queue all tasks at once (the queue method will skip duplicates)
+        // Queue all tasks at once, forcing re-download if they were previously "completed"
+        // This handles the case where blocks were downloaded but never applied (e.g., node restart)
         if !tasks.is_empty() {
-            self.downloader.queue(tasks);
+            let task_count = tasks.len();
+            self.downloader.queue_force(tasks);
 
             // Log current state
             let new_stats = self.downloader.stats();
-            info!(
-                requested = headers.len(),
-                first_height = headers.first().map(|h| h.height),
-                last_height = headers.last().map(|h| h.height),
-                pending = new_stats.pending,
-                in_flight = new_stats.in_flight,
-                was_pending = stats.pending,
-                was_in_flight = stats.in_flight,
-                "Queued block downloads"
-            );
+            let added = new_stats.pending.saturating_sub(stats.pending);
+
+            // Log differently based on whether tasks were actually added
+            if added > 0 {
+                info!(
+                    requested = headers.len(),
+                    first_height = headers.first().map(|h| h.height),
+                    last_height = headers.last().map(|h| h.height),
+                    added,
+                    pending = new_stats.pending,
+                    in_flight = new_stats.in_flight,
+                    completed = new_stats.completed,
+                    "Queued block downloads"
+                );
+            } else {
+                // All tasks were skipped - likely already completed or in-flight
+                debug!(
+                    requested = headers.len(),
+                    first_height = headers.first().map(|h| h.height),
+                    last_height = headers.last().map(|h| h.height),
+                    task_count,
+                    pending = new_stats.pending,
+                    in_flight = new_stats.in_flight,
+                    completed = new_stats.completed,
+                    "Block download request - all tasks skipped (already completed/pending/in-flight)"
+                );
+            }
         }
 
         // Dispatch the downloads immediately
@@ -1345,6 +1597,11 @@ impl SyncProtocol {
 
     /// Periodic tick handler.
     async fn on_tick(&self) -> SyncResult<()> {
+        // Flush any buffered headers that have timed out
+        if self.should_flush_headers() {
+            self.flush_pending_headers_to_storage().await?;
+        }
+
         // Check for block download timeouts
         let timed_out = self.downloader.check_timeouts();
         for (id, peer) in timed_out {
@@ -1391,7 +1648,17 @@ impl SyncProtocol {
         let our_height = self.synchronizer.our_height();
         let peer_height = self.synchronizer.best_peer_height().unwrap_or(0);
         let stats = self.downloader.stats();
-        let missing_blocks = self.header_chain.read().missing_blocks.len();
+        let chain = self.header_chain.read();
+        let missing_blocks = chain.missing_blocks.len();
+        let our_header_height = chain.headers.back().map(|h| h.height).unwrap_or(0);
+        drop(chain);
+
+        // Use best available network height estimate
+        let estimated_network_height = if peer_height > 0 {
+            peer_height
+        } else {
+            our_header_height
+        };
 
         // Check if we have peers with headers (even if we don't know their height)
         let has_peers_with_headers = self
@@ -1400,22 +1667,23 @@ impl SyncProtocol {
             .values()
             .any(|s| !s.best_headers.is_empty());
 
-        if our_height < peer_height
+        if our_height < estimated_network_height
             || has_peers_with_headers
             || stats.pending > 0
             || stats.in_flight > 0
             || missing_blocks > 0
         {
             // Indicate sync mode in log
-            // If peer_height is 0 but we have peers with headers, we're still syncing headers
-            let sync_mode = if peer_height == 0 || our_height + 1000 < peer_height {
-                "headers"
-            } else {
-                "blocks"
-            };
+            let sync_mode =
+                if estimated_network_height > 0 && our_height + 1000 < estimated_network_height {
+                    "headers"
+                } else {
+                    "blocks"
+                };
             info!(
                 our_height,
                 peer_height,
+                header_height = our_header_height,
                 sync_mode,
                 pending = stats.pending,
                 in_flight = stats.in_flight,
@@ -1434,13 +1702,31 @@ impl SyncProtocol {
         let our_height = self.synchronizer.our_height();
         let peer_height = self.synchronizer.best_peer_height().unwrap_or(0);
 
+        // Get our best header height from the chain - this is more reliable than peer_height
+        // when peers are using V1 SyncInfo (which doesn't include height)
+        let our_header_height = self
+            .header_chain
+            .read()
+            .headers
+            .back()
+            .map(|h| h.height)
+            .unwrap_or(0);
+
+        // Use the best available estimate of network height:
+        // - peer_height if known (from V2 SyncInfo)
+        // - our_header_height as fallback (we've synced headers to this point)
+        let estimated_network_height = if peer_height > 0 {
+            peer_height
+        } else {
+            our_header_height
+        };
+
         // During initial header sync, don't download blocks yet
         // Only start downloading blocks when we're within 1000 headers of the tip
         // This implements header-first sync strategy
         //
-        // Also skip if peer_height is 0 (unknown) - we're still discovering the chain
-        // With V1 SyncInfo we don't know the peer's actual height, so be conservative
-        if peer_height == 0 || our_height + 1000 < peer_height {
+        // Skip only if we have a valid network height estimate and are far behind
+        if estimated_network_height > 0 && our_height + 1000 < estimated_network_height {
             // Still syncing headers, skip block downloads for now
             return;
         }
