@@ -298,8 +298,9 @@ struct PeerSyncState {
     chain_status: PeerChainStatus,
 }
 
-/// Minimum interval between SyncInfo messages to the same peer (20 seconds like Scala node).
-const MIN_SYNC_INTERVAL: std::time::Duration = std::time::Duration::from_secs(20);
+/// Minimum interval between SyncInfo messages to the same peer.
+/// Default Scala node uses 20 seconds, but for local sync we can be aggressive.
+const MIN_SYNC_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
 
 /// Minimum interval between processing SyncInfo from the same peer (100ms like Scala node).
 /// This prevents resource exhaustion from spammy peers.
@@ -308,7 +309,7 @@ const PER_PEER_SYNC_LOCK_TIME: std::time::Duration = std::time::Duration::from_m
 /// Minimum interval between modifier requests to the same peer.
 /// The Scala node doesn't have explicit per-request throttling, but has deliveryTimeout = 10s.
 /// Using 100ms to allow fast sequential requests while avoiding overwhelming peers.
-const MIN_REQUEST_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+const MIN_REQUEST_INTERVAL: std::time::Duration = std::time::Duration::from_millis(1);
 
 /// Maximum number of header IDs to include in SyncInfo message.
 /// The Scala node samples ~100 headers from the chain for SyncInfo.
@@ -911,9 +912,12 @@ impl SyncProtocol {
 
                 info!(peer = %peer, type_id = request.type_id, count = request.ids.len(), "Sending RequestModifier");
 
-                // Update last request time for rate limiting
-                if let Some(state) = self.sync_peers.write().get_mut(&peer) {
-                    state.last_request_sent = std::time::Instant::now();
+                // Only update rate limit for non-header requests (blocks)
+                // Header requests shouldn't block block downloads during sync
+                if !is_header_inv {
+                    if let Some(state) = self.sync_peers.write().get_mut(&peer) {
+                        state.last_request_sent = std::time::Instant::now();
+                    }
                 }
 
                 self.send_to_peer(&peer, Message::RequestModifier(request))
@@ -1665,11 +1669,14 @@ impl SyncProtocol {
             tasks.push(task);
         }
 
-        // Queue all tasks at once, forcing re-download if they were previously "completed"
-        // This handles the case where blocks were downloaded but never applied (e.g., node restart)
+        // Queue all tasks at once
+        // Use regular queue (not force) - completed blocks should stay completed unless
+        // there's an explicit failure. This prevents infinite re-download loops when
+        // blocks are downloaded but buffered waiting for earlier blocks to arrive.
+        // For node restart case, the downloader's completed set is empty anyway.
         if !tasks.is_empty() {
             let task_count = tasks.len();
-            self.downloader.queue_force(tasks);
+            self.downloader.queue(tasks);
 
             // Log current state
             let new_stats = self.downloader.stats();
@@ -1718,7 +1725,26 @@ impl SyncProtocol {
         // Check for block download timeouts
         let timed_out = self.downloader.check_timeouts();
         for (id, peer) in timed_out {
-            warn!(id = hex::encode(&id), peer = %peer, "Block download timed out");
+            // Try to find the height for this block to make debugging easier
+            let height = {
+                let chain = self.header_chain.read();
+                chain
+                    .tx_id_to_header_id
+                    .get(&id)
+                    .and_then(|header_id| {
+                        chain
+                            .headers
+                            .iter()
+                            .find(|h| h.id.0.as_ref() == header_id.as_slice())
+                            .map(|h| h.height)
+                    })
+            };
+            warn!(
+                id = hex::encode(&id),
+                peer = %peer,
+                height = ?height,
+                "Block download timed out - peer may not have this block at this ID"
+            );
             self.downloader.fail(&id, &peer);
         }
 
@@ -1969,10 +1995,7 @@ impl SyncProtocol {
                         }
                     }
 
-                    // Update last request time
-                    if let Some(state) = self.sync_peers.write().get_mut(&peer) {
-                        state.last_request_sent = std::time::Instant::now();
-                    }
+                    // Don't update last_request_sent for headers - only blocks use rate limit
 
                     let request = ModifierRequest {
                         type_id: ModifierType::Header.to_byte(),
@@ -2092,14 +2115,29 @@ impl SyncProtocol {
             }
 
             // Group tasks by type and batch them
+            // Also track heights for logging
             let mut by_type: std::collections::HashMap<u8, Vec<Vec<u8>>> =
                 std::collections::HashMap::new();
-            for task in &tasks {
-                by_type
-                    .entry(task.type_id)
-                    .or_default()
-                    .push(task.id.clone());
-                self.downloader.dispatch(&task.id, peer.clone());
+            let mut heights: Vec<u32> = Vec::new();
+            {
+                let chain = self.header_chain.read();
+                for task in &tasks {
+                    by_type
+                        .entry(task.type_id)
+                        .or_default()
+                        .push(task.id.clone());
+                    self.downloader.dispatch(&task.id, peer.clone());
+                    // Try to find height for this block
+                    if let Some(header_id) = chain.tx_id_to_header_id.get(&task.id) {
+                        if let Some(h) = chain
+                            .headers
+                            .iter()
+                            .find(|h| h.id.0.as_ref() == header_id.as_slice())
+                        {
+                            heights.push(h.height);
+                        }
+                    }
+                }
             }
 
             // Update peer state
@@ -2110,10 +2148,16 @@ impl SyncProtocol {
 
             // Send one batched request per type
             for (type_id, ids) in by_type {
+                // Log with heights to help debugging
+                heights.sort();
+                let first_height = heights.first().copied();
+                let last_height = heights.last().copied();
                 debug!(
                     peer = %peer,
                     type_id,
                     count = ids.len(),
+                    first_height = ?first_height,
+                    last_height = ?last_height,
                     "Dispatching block download request"
                 );
                 let request = ModifierRequest { type_id, ids };

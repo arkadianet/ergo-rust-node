@@ -2,8 +2,9 @@
 
 use crate::PARALLEL_DOWNLOADS;
 use ergo_network::PeerId;
+use indexmap::IndexMap;
 use parking_lot::RwLock;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
 use tracing::{debug, warn};
 
@@ -76,10 +77,11 @@ impl Default for DownloadConfig {
 pub struct BlockDownloader {
     /// Configuration.
     config: DownloadConfig,
-    /// Pending tasks (id -> task).
-    pending: RwLock<HashMap<Vec<u8>, DownloadTask>>,
+    /// Pending tasks (id -> task) - uses IndexMap to preserve insertion order.
+    /// This ensures blocks are dispatched in the order they were queued (height order).
+    pending: RwLock<IndexMap<Vec<u8>, DownloadTask>>,
     /// In-flight requests (id -> peer).
-    in_flight: RwLock<HashMap<Vec<u8>, PeerId>>,
+    in_flight: RwLock<IndexMap<Vec<u8>, PeerId>>,
     /// Completed IDs.
     completed: RwLock<HashSet<Vec<u8>>>,
     /// Failed IDs.
@@ -91,8 +93,8 @@ impl BlockDownloader {
     pub fn new(config: DownloadConfig) -> Self {
         Self {
             config,
-            pending: RwLock::new(HashMap::new()),
-            in_flight: RwLock::new(HashMap::new()),
+            pending: RwLock::new(IndexMap::new()),
+            in_flight: RwLock::new(IndexMap::new()),
             completed: RwLock::new(HashSet::new()),
             failed: RwLock::new(HashSet::new()),
         }
@@ -206,7 +208,7 @@ impl BlockDownloader {
 
     /// Mark a task as dispatched to a peer.
     pub fn dispatch(&self, id: &[u8], peer: PeerId) {
-        if let Some(mut task) = self.pending.write().get_mut(id) {
+        if let Some(task) = self.pending.write().get_mut(id) {
             task.peer = Some(peer.clone());
             task.requested_at = Some(Instant::now());
         }
@@ -215,15 +217,15 @@ impl BlockDownloader {
 
     /// Mark a task as completed.
     pub fn complete(&self, id: &[u8]) {
-        self.pending.write().remove(id);
-        self.in_flight.write().remove(id);
+        self.pending.write().shift_remove(id);
+        self.in_flight.write().shift_remove(id);
         self.completed.write().insert(id.to_vec());
         debug!(id = hex::encode(id), "Download completed");
     }
 
     /// Handle a failed download.
     pub fn fail(&self, id: &[u8], peer: &PeerId) {
-        self.in_flight.write().remove(id);
+        self.in_flight.write().shift_remove(id);
 
         let mut pending = self.pending.write();
         if let Some(task) = pending.get_mut(id) {
@@ -240,7 +242,7 @@ impl BlockDownloader {
                     failed_peers = task.failed_peers.len(),
                     "Download failed permanently"
                 );
-                pending.remove(id);
+                pending.shift_remove(id);
                 drop(pending);
                 self.failed.write().insert(id.to_vec());
             } else {
