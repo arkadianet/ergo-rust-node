@@ -7,7 +7,7 @@ use rocksdb::{
     MultiThreaded, Options,
 };
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tracing::{debug, info};
 
@@ -138,6 +138,8 @@ pub struct Database {
     /// During initial sync, data can be re-downloaded if lost, so durability
     /// is less critical than throughput.
     sync_mode: Arc<AtomicBool>,
+    /// Counter for batch writes, used for periodic WAL status logging.
+    batch_write_count: AtomicU64,
 }
 
 impl Database {
@@ -208,6 +210,7 @@ impl Database {
             block_cache,
             block_cache_capacity: DEFAULT_BLOCK_CACHE_SIZE,
             sync_mode: Arc::new(AtomicBool::new(false)),
+            batch_write_count: AtomicU64::new(0),
         })
     }
 
@@ -230,6 +233,7 @@ impl Database {
             block_cache,
             block_cache_capacity: READONLY_BLOCK_CACHE_SIZE,
             sync_mode: Arc::new(AtomicBool::new(false)),
+            batch_write_count: AtomicU64::new(0),
         })
     }
 
@@ -340,7 +344,14 @@ impl Storage for Database {
             .cf_handle(cf.name())
             .ok_or_else(|| StorageError::ColumnFamilyNotFound(cf.name().to_string()))?;
 
-        db.put_cf(&handle, key, value)?;
+        // Respect sync_mode for WAL disable
+        let mut write_opts = rocksdb::WriteOptions::default();
+        write_opts.set_sync(false);
+        if self.sync_mode.load(Ordering::Relaxed) {
+            write_opts.disable_wal(true);
+        }
+
+        db.put_cf_opt(&handle, key, value, &write_opts)?;
         Ok(())
     }
 
@@ -350,7 +361,14 @@ impl Storage for Database {
             .cf_handle(cf.name())
             .ok_or_else(|| StorageError::ColumnFamilyNotFound(cf.name().to_string()))?;
 
-        db.delete_cf(&handle, key)?;
+        // Respect sync_mode for WAL disable
+        let mut write_opts = rocksdb::WriteOptions::default();
+        write_opts.set_sync(false);
+        if self.sync_mode.load(Ordering::Relaxed) {
+            write_opts.disable_wal(true);
+        }
+
+        db.delete_cf_opt(&handle, key, &write_opts)?;
         Ok(())
     }
 
@@ -379,10 +397,16 @@ impl Storage for Database {
 
         // In sync mode, disable WAL for ~50% disk I/O reduction.
         // Safe because data can be re-downloaded on crash.
-        if self.sync_mode.load(Ordering::Relaxed) {
-            write_opts.disable_wal(true);
-        } else {
-            write_opts.disable_wal(false);
+        let wal_disabled = self.sync_mode.load(Ordering::Relaxed);
+        write_opts.disable_wal(wal_disabled);
+
+        // Log WAL status periodically (every 10000 batches)
+        let count = self.batch_write_count.fetch_add(1, Ordering::Relaxed);
+        if count % 10000 == 0 {
+            info!(
+                batch_count = count,
+                wal_disabled, "RocksDB write batch status"
+            );
         }
 
         db.write_opt(rocks_batch, &write_opts)?;
@@ -418,6 +442,8 @@ impl Clone for Database {
             block_cache: self.block_cache.clone(),
             block_cache_capacity: self.block_cache_capacity,
             sync_mode: Arc::clone(&self.sync_mode),
+            // Share the same counter across clones
+            batch_write_count: AtomicU64::new(self.batch_write_count.load(Ordering::Relaxed)),
         }
     }
 }

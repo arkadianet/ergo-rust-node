@@ -117,8 +117,9 @@ pub enum SyncEvent {
 
 /// Maximum number of headers to keep in memory.
 /// Headers older than this are dropped to save memory.
-/// With ~500 bytes per header, 10000 headers = ~5MB.
-const MAX_CACHED_HEADERS: usize = 10_000;
+/// With ~500 bytes per header, 50000 headers = ~25MB.
+/// Increased from 10k to reduce header cache misses during fast sync.
+const MAX_CACHED_HEADERS: usize = 50_000;
 
 /// Maximum number of block IDs to track for download.
 /// This limits memory used by missing_blocks and tx_id_to_header_id.
@@ -381,8 +382,9 @@ const V2_SYNC_OFFSETS: [u32; 4] = [0, 16, 128, 512];
 const HEADER_BATCH_SIZE: usize = 200;
 
 /// Maximum size of the stored_headers LRU cache.
-/// 50,000 entries covers ~2 days of blocks at 2min/block, plenty for active sync window.
-const STORED_HEADERS_CACHE_SIZE: usize = 50_000;
+/// 100,000 entries covers ~4 days of blocks at 2min/block, plenty for active sync window.
+/// Increased to reduce cache misses during fast sync.
+const STORED_HEADERS_CACHE_SIZE: usize = 100_000;
 
 /// Maximum size of the pending_headers map (headers waiting for their parent).
 const MAX_PENDING_HEADERS: usize = 10_000;
@@ -2185,14 +2187,28 @@ impl SyncProtocol {
             }
         }
 
-        // Distribute tasks across peers: up to 16 blocks per peer
-        // Limit to 8 peers max to avoid overwhelming the network with too many concurrent requests
-        // With 8 peers × 16 blocks = 128 blocks in-flight, which is a good balance
-        const MAX_BLOCKS_PER_PEER: usize = 16;
-        const MAX_PEERS_TO_USE: usize = 8;
+        // Distribute tasks across peers: up to 32 blocks per peer
+        // Use up to 16 peers for maximum parallelism during initial sync
+        // With 16 peers × 32 blocks = 512 blocks in-flight for fast sync
+        const MAX_BLOCKS_PER_PEER: usize = 32;
+        const MAX_PEERS_TO_USE: usize = 16;
 
         let mut total_dispatched = 0;
         let peers_to_use = available_peers.len().min(MAX_PEERS_TO_USE);
+
+        // Log dispatch diagnostics periodically
+        static DISPATCH_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let dispatch_num = DISPATCH_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if dispatch_num % 100 == 0 {
+            info!(
+                dispatch_num,
+                available_peers = available_peers.len(),
+                peers_to_use,
+                pending = stats.pending,
+                in_flight = stats.in_flight,
+                "Dispatch diagnostics"
+            );
+        }
 
         for peer in available_peers.iter().take(peers_to_use) {
             // Get tasks that can be dispatched to THIS peer

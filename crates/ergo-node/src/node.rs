@@ -528,8 +528,8 @@ impl Node {
                         // and there's a meaningful gap (at least 1 block behind)
                         if header_height > utxo_height && header_height > 0 {
                             // Request next batch of blocks starting from current UTXO height + 1
-                            // Use batch of 64 to better fill the download pipeline
-                            let batch_size = 64.min(header_height - utxo_height) as u32;
+                            // Use large batch (512) to fill the download pipeline
+                            let batch_size = 512.min(header_height - utxo_height) as u32;
                             match state_for_router.get_headers(utxo_height + 1, batch_size) {
                                 Ok(headers) if !headers.is_empty() => {
                                     info!(
@@ -1156,7 +1156,8 @@ impl Node {
 
                                 if utxo_height < header_height {
                                     // Get next batch of headers to download blocks for
-                                    let batch_size = 16.min(header_height - utxo_height) as u32;
+                                    // Use larger batch (256) to keep download pipeline full
+                                    let batch_size = 256.min(header_height - utxo_height) as u32;
                                     match state_for_router.get_headers(utxo_height + 1, batch_size) {
                                         Ok(headers) if !headers.is_empty() => {
                                             debug!(
