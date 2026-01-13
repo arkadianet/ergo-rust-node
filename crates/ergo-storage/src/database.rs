@@ -7,6 +7,7 @@ use rocksdb::{
     MultiThreaded, Options,
 };
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tracing::{debug, info};
 
@@ -133,6 +134,10 @@ pub struct Database {
     db: Arc<RwLock<DBWithThreadMode<MultiThreaded>>>,
     block_cache: Cache,
     block_cache_capacity: usize,
+    /// Sync mode flag - when enabled, WAL is disabled for faster sync.
+    /// During initial sync, data can be re-downloaded if lost, so durability
+    /// is less critical than throughput.
+    sync_mode: Arc<AtomicBool>,
 }
 
 impl Database {
@@ -202,6 +207,7 @@ impl Database {
             db: Arc::new(RwLock::new(db)),
             block_cache,
             block_cache_capacity: DEFAULT_BLOCK_CACHE_SIZE,
+            sync_mode: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -223,6 +229,7 @@ impl Database {
             db: Arc::new(RwLock::new(db)),
             block_cache,
             block_cache_capacity: READONLY_BLOCK_CACHE_SIZE,
+            sync_mode: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -292,6 +299,29 @@ impl Database {
             "RocksDB memory usage"
         );
     }
+
+    /// Enable or disable sync mode.
+    ///
+    /// When sync mode is enabled, WAL (Write-Ahead Log) is disabled to reduce
+    /// disk I/O by ~50%. This is safe during initial sync because:
+    /// - On normal shutdown: No data loss (memtables are flushed)
+    /// - On crash: Lose unflushed memtable data (a few seconds of blocks),
+    ///   but SST files are crash-safe. Node resumes from last flushed height.
+    pub fn set_sync_mode(&self, enabled: bool) {
+        let was_enabled = self.sync_mode.swap(enabled, Ordering::Relaxed);
+        if was_enabled != enabled {
+            if enabled {
+                info!("Database sync mode enabled - WAL disabled for faster sync");
+            } else {
+                info!("Database sync mode disabled - WAL re-enabled for durability");
+            }
+        }
+    }
+
+    /// Check if sync mode is enabled.
+    pub fn is_sync_mode(&self) -> bool {
+        self.sync_mode.load(Ordering::Relaxed)
+    }
 }
 
 impl Storage for Database {
@@ -343,11 +373,17 @@ impl Storage for Database {
             }
         }
 
-        // Use non-sync write for better performance during sync
-        // WAL provides durability, we just skip the fsync
+        // Configure write options based on sync mode
         let mut write_opts = rocksdb::WriteOptions::default();
-        write_opts.disable_wal(false); // Keep WAL for durability
         write_opts.set_sync(false); // Don't fsync on every write
+
+        // In sync mode, disable WAL for ~50% disk I/O reduction.
+        // Safe because data can be re-downloaded on crash.
+        if self.sync_mode.load(Ordering::Relaxed) {
+            write_opts.disable_wal(true);
+        } else {
+            write_opts.disable_wal(false);
+        }
 
         db.write_opt(rocks_batch, &write_opts)?;
         Ok(())
@@ -381,6 +417,7 @@ impl Clone for Database {
             db: Arc::clone(&self.db),
             block_cache: self.block_cache.clone(),
             block_cache_capacity: self.block_cache_capacity,
+            sync_mode: Arc::clone(&self.sync_mode),
         }
     }
 }

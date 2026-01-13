@@ -361,6 +361,7 @@ impl Node {
                 "Enabling sync mode - index maintenance disabled for faster sync"
             );
             self.state.utxo.set_sync_mode(true);
+            self.storage.set_sync_mode(true);
         }
         if header_height > 0 {
             // Set the synchronizer's height to our stored header height
@@ -479,6 +480,7 @@ impl Node {
         let shutdown_for_router = shutdown.clone();
         let sync_event_tx_clone = sync_event_tx.clone();
         let state_for_router = Arc::clone(&self.state);
+        let storage_for_router = Arc::clone(&self.storage);
 
         // Track peer addresses for reconnection
         let mut peer_addresses: HashMap<PeerId, SocketAddr> = HashMap::new();
@@ -737,6 +739,18 @@ impl Node {
                                             "Batch of {} headers stored in state",
                                             count
                                         );
+                                        // Enable sync mode dynamically if we're far behind
+                                        let (utxo_height, header_height) = state_for_router.heights();
+                                        if !state_for_router.utxo.is_sync_mode() && header_height > utxo_height + 1000 {
+                                            info!(
+                                                utxo_height,
+                                                header_height,
+                                                blocks_behind = header_height - utxo_height,
+                                                "Enabling sync mode - far behind, disabling index maintenance"
+                                            );
+                                            state_for_router.utxo.set_sync_mode(true);
+                                            storage_for_router.set_sync_mode(true);
+                                        }
                                         Ok(())
                                     }
                                     Err(e) => {
@@ -1122,15 +1136,20 @@ impl Node {
                                 let (utxo_height, header_height) = state_for_router.heights();
 
                                 // Check if we've caught up - disable sync mode only when fully synced
-                                // (full_block_height == header_height) to avoid index write amplification
-                                // during the final part of sync
-                                if state_for_router.utxo.is_sync_mode() && state_for_router.is_synced() {
+                                // AND we're at a reasonable height (> 1M blocks for mainnet).
+                                // This prevents toggling sync mode on/off during early sync when
+                                // blocks temporarily catch up to headers before more headers arrive.
+                                const MIN_HEIGHT_FOR_SYNC_COMPLETE: u32 = 1_000_000;
+                                let is_reasonably_synced = state_for_router.is_synced()
+                                    && header_height > MIN_HEIGHT_FOR_SYNC_COMPLETE;
+                                if state_for_router.utxo.is_sync_mode() && is_reasonably_synced {
                                     info!(
                                         utxo_height,
                                         header_height,
                                         "Sync complete - disabling sync mode, index maintenance resumed"
                                     );
                                     state_for_router.utxo.set_sync_mode(false);
+                                    storage_for_router.set_sync_mode(false);
                                     // Note: Indexes will be rebuilt incrementally as new blocks arrive
                                     // For a full rebuild, could spawn a background task here
                                 }
