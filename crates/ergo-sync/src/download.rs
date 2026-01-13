@@ -2,10 +2,17 @@
 
 use crate::PARALLEL_DOWNLOADS;
 use ergo_network::PeerId;
+use lru::LruCache;
 use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};
+use std::num::NonZeroUsize;
 use std::time::{Duration, Instant};
 use tracing::{debug, warn};
+
+/// Maximum size of the completed downloads LRU cache.
+/// 50,000 entries is enough to prevent re-downloads during normal sync
+/// while bounding memory usage.
+const COMPLETED_CACHE_SIZE: usize = 50_000;
 
 /// A download task.
 #[derive(Debug, Clone)]
@@ -80,8 +87,8 @@ pub struct BlockDownloader {
     pending: RwLock<HashMap<Vec<u8>, DownloadTask>>,
     /// In-flight requests (id -> peer).
     in_flight: RwLock<HashMap<Vec<u8>, PeerId>>,
-    /// Completed IDs.
-    completed: RwLock<HashSet<Vec<u8>>>,
+    /// Completed IDs (LRU cache to bound memory while preventing re-downloads).
+    completed: RwLock<LruCache<Vec<u8>, ()>>,
     /// Failed IDs.
     failed: RwLock<HashSet<Vec<u8>>>,
 }
@@ -93,7 +100,9 @@ impl BlockDownloader {
             config,
             pending: RwLock::new(HashMap::new()),
             in_flight: RwLock::new(HashMap::new()),
-            completed: RwLock::new(HashSet::new()),
+            completed: RwLock::new(LruCache::new(
+                NonZeroUsize::new(COMPLETED_CACHE_SIZE).unwrap(),
+            )),
             failed: RwLock::new(HashSet::new()),
         }
     }
@@ -127,7 +136,7 @@ impl BlockDownloader {
             // Check completed - if force is true, remove from completed and re-queue
             if completed.contains(&task.id) {
                 if force {
-                    completed.remove(&task.id);
+                    completed.pop(&task.id);
                     forced += 1;
                 } else {
                     continue;
@@ -217,7 +226,7 @@ impl BlockDownloader {
     pub fn complete(&self, id: &[u8]) {
         self.pending.write().remove(id);
         self.in_flight.write().remove(id);
-        self.completed.write().insert(id.to_vec());
+        self.completed.write().put(id.to_vec(), ());
         debug!(id = hex::encode(id), "Download completed");
     }
 
@@ -302,14 +311,9 @@ impl BlockDownloader {
         self.pending.read().is_empty() && self.in_flight.read().is_empty()
     }
 
-    /// Clear completed set (to free memory).
-    pub fn clear_completed(&self) {
-        self.completed.write().clear();
-    }
-
     /// Remove a specific ID from the completed set (to allow re-downloading).
     pub fn uncomplete(&self, id: &[u8]) {
-        self.completed.write().remove(id);
+        self.completed.write().pop(id);
     }
 }
 

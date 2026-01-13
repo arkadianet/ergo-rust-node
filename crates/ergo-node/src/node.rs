@@ -1121,19 +1121,18 @@ impl Node {
                                 // After processing, request more blocks if we're still behind
                                 let (utxo_height, header_height) = state_for_router.heights();
 
-                                // Check if we've caught up - disable sync mode if within 10 blocks
-                                if state_for_router.utxo.is_sync_mode() {
-                                    let blocks_behind = header_height.saturating_sub(utxo_height);
-                                    if blocks_behind <= 10 {
-                                        info!(
-                                            utxo_height,
-                                            header_height,
-                                            "Sync complete - disabling sync mode, index maintenance resumed"
-                                        );
-                                        state_for_router.utxo.set_sync_mode(false);
-                                        // Note: Indexes will be rebuilt incrementally as new blocks arrive
-                                        // For a full rebuild, could spawn a background task here
-                                    }
+                                // Check if we've caught up - disable sync mode only when fully synced
+                                // (full_block_height == header_height) to avoid index write amplification
+                                // during the final part of sync
+                                if state_for_router.utxo.is_sync_mode() && state_for_router.is_synced() {
+                                    info!(
+                                        utxo_height,
+                                        header_height,
+                                        "Sync complete - disabling sync mode, index maintenance resumed"
+                                    );
+                                    state_for_router.utxo.set_sync_mode(false);
+                                    // Note: Indexes will be rebuilt incrementally as new blocks arrive
+                                    // For a full rebuild, could spawn a background task here
                                 }
 
                                 if utxo_height < header_height {

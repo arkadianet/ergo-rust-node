@@ -240,7 +240,7 @@ fn test_block_downloader_is_complete() {
 }
 
 #[test]
-fn test_block_downloader_clear_completed() {
+fn test_block_downloader_uncomplete() {
     let downloader = BlockDownloader::new(DownloadConfig::default());
 
     let id = vec![1, 2, 3, 4];
@@ -254,7 +254,8 @@ fn test_block_downloader_clear_completed() {
     let stats = downloader.stats();
     assert_eq!(stats.completed, 1);
 
-    downloader.clear_completed();
+    // uncomplete removes a specific ID from completed set
+    downloader.uncomplete(&id);
 
     let stats = downloader.stats();
     assert_eq!(stats.completed, 0);
