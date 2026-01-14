@@ -481,6 +481,7 @@ impl Node {
         let sync_event_tx_clone = sync_event_tx.clone();
         let state_for_router = Arc::clone(&self.state);
         let storage_for_router = Arc::clone(&self.storage);
+        let sync_protocol_for_router = Arc::clone(&sync_protocol);
 
         // Track peer addresses for reconnection
         let mut peer_addresses: HashMap<PeerId, SocketAddr> = HashMap::new();
@@ -524,7 +525,13 @@ impl Node {
                     }
                     // Periodic block sync check - triggers block downloads when headers are ahead
                     _ = block_sync_interval.tick() => {
-                        let (utxo_height, header_height) = state_for_router.heights();
+                        let (utxo_height, db_header_height) = state_for_router.heights();
+                        // Use the protocol's best header height which includes in-memory headers
+                        // that haven't been flushed to the database yet. This prevents block
+                        // downloads from stalling when blocks catch up to stored headers.
+                        let protocol_header_height = sync_protocol_for_router.best_header_height();
+                        let header_height = db_header_height.max(protocol_header_height);
+
                         // Only trigger if we have headers ahead of our UTXO state
                         // and there's a meaningful gap (at least 1 block behind)
                         if header_height > utxo_height && header_height > 0 {

@@ -669,6 +669,17 @@ impl SyncProtocol {
         self.synchronizer.set_height(height);
     }
 
+    /// Get the best header height from the in-memory chain.
+    /// This may be higher than the stored database height during sync.
+    pub fn best_header_height(&self) -> u32 {
+        self.header_chain
+            .read()
+            .headers
+            .back()
+            .map(|h| h.height)
+            .unwrap_or_else(|| self.synchronizer.our_height())
+    }
+
     /// Handle an incoming sync event.
     pub async fn handle_event(&self, event: SyncEvent) -> SyncResult<()> {
         match event {
