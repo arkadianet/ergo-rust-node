@@ -162,7 +162,12 @@ impl HeaderChain {
         // Add the new entries
         self.headers_by_id.insert(header_id.clone(), header.clone());
         self.headers.push_back(header);
-        self.missing_blocks.push_back(transactions_id.clone());
+        // NOTE: Do NOT add to missing_blocks here!
+        // Headers are buffered before being written to the database.
+        // If we add to missing_blocks now, queue_block_downloads() may request blocks
+        // before the headers are in the database, causing "Header not found" errors.
+        // Block downloads are properly handled by block_sync_interval in node.rs,
+        // which only requests blocks for headers that are already stored in the database.
         self.header_id_to_tx_id
             .insert(header_id.clone(), transactions_id.clone());
         self.tx_id_to_header_id.insert(transactions_id, header_id);
@@ -379,7 +384,8 @@ const MAX_V2_HEADERS: usize = 10;
 const V2_SYNC_OFFSETS: [u32; 4] = [0, 16, 128, 512];
 
 /// Maximum number of headers to buffer before flushing to storage.
-const HEADER_BATCH_SIZE: usize = 200;
+/// Increased from 200 to amortize storage overhead during fast sync.
+const HEADER_BATCH_SIZE: usize = 500;
 
 /// Maximum size of the stored_headers LRU cache.
 /// 100,000 entries covers ~4 days of blocks at 2min/block, plenty for active sync window.
@@ -472,8 +478,9 @@ struct PeerSyncState {
     chain_status: PeerChainStatus,
 }
 
-/// Minimum interval between SyncInfo messages to the same peer (20 seconds like Scala node).
-const MIN_SYNC_INTERVAL: std::time::Duration = std::time::Duration::from_secs(20);
+/// Minimum interval between SyncInfo messages to the same peer.
+/// Reduced from 20s to 5s for faster header discovery during initial sync.
+const MIN_SYNC_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Minimum interval between processing SyncInfo from the same peer (100ms like Scala node).
 /// This prevents resource exhaustion from spammy peers.
@@ -957,13 +964,6 @@ impl SyncProtocol {
 
     /// Handle inventory announcement.
     async fn on_inv(&self, peer: PeerId, inv: InvData) -> SyncResult<()> {
-        info!(
-            peer = %peer,
-            type_id = inv.type_id,
-            count = inv.ids.len(),
-            "Received Inv, requesting modifiers"
-        );
-
         // Request modifiers in batches
         // Scala node uses desiredInvObjects = 400, so we can request up to 400 at once
         const MAX_REQUEST_SIZE: usize = 400;
@@ -971,6 +971,25 @@ impl SyncProtocol {
         // Identify the modifier type
         let is_header_inv = inv.type_id == ModifierType::Header.to_byte();
         let is_transaction_inv = inv.type_id == ModifierType::Transaction.to_byte();
+        let is_block_transactions_inv = inv.type_id == ModifierType::BlockTransactions.to_byte();
+
+        // Ignore BlockTransactions Inv - we request blocks ourselves based on stored headers
+        // This prevents requesting blocks before headers are synced, which causes failures
+        if is_block_transactions_inv {
+            debug!(
+                peer = %peer,
+                count = inv.ids.len(),
+                "Ignoring BlockTransactions Inv - blocks requested via block_sync_interval"
+            );
+            return Ok(());
+        }
+
+        info!(
+            peer = %peer,
+            type_id = inv.type_id,
+            count = inv.ids.len(),
+            "Received Inv, requesting modifiers"
+        );
 
         if is_transaction_inv {
             info!(
@@ -1606,11 +1625,13 @@ impl SyncProtocol {
                 }
             }
         } else {
-            // We don't have the header - this shouldn't happen in normal sync
-            // but we can still proceed and let the state manager validate
-            warn!(
+            // Header not in local cache - this can happen during fast sync when
+            // headers are loaded from database via block_sync_interval but may not
+            // be in the in-memory cache. This is benign - the state manager will
+            // validate the block against the header from the database.
+            debug!(
                 id = hex::encode(&id),
-                "Received block without corresponding header in cache"
+                "Block header not in cache, skipping local validation"
             );
         }
 
@@ -1768,8 +1789,10 @@ impl SyncProtocol {
                     chain.track_header(header.clone(), transactions_id.clone(), header_id.clone());
                 }
             }
-            // Enforce limits once after all headers are added
-            chain.enforce_limits();
+            // NOTE: Do NOT call enforce_limits() here!
+            // These headers are for blocks we're about to download - evicting them
+            // immediately would cause "header not in cache" warnings when blocks arrive.
+            // Headers will be removed via remove_header() when blocks are applied.
         }
 
         // Create download tasks
@@ -1779,11 +1802,13 @@ impl SyncProtocol {
             tasks.push(task);
         }
 
-        // Queue all tasks at once, forcing re-download if they were previously "completed"
-        // This handles the case where blocks were downloaded but never applied (e.g., node restart)
+        // Queue all tasks at once
+        // Use queue() instead of queue_force() to avoid re-queuing blocks that are
+        // already completed but waiting to be applied. This is called every second,
+        // so we don't want to repeatedly re-request the same blocks.
         if !tasks.is_empty() {
             let task_count = tasks.len();
-            self.downloader.queue_force(tasks);
+            self.downloader.queue(tasks);
 
             // Log current state
             let new_stats = self.downloader.stats();
@@ -1965,7 +1990,8 @@ impl SyncProtocol {
         let stats = self.downloader.stats();
 
         // Don't queue more if we already have enough pending
-        if stats.pending + stats.in_flight >= 16 {
+        // Increased from 16 to match PARALLEL_DOWNLOADS for full parallelism
+        if stats.pending + stats.in_flight >= PARALLEL_DOWNLOADS {
             return;
         }
 
@@ -2023,7 +2049,8 @@ impl SyncProtocol {
 
         // Don't request more headers if we have enough in flight
         // (timeouts are handled separately in on_tick via header_timeout)
-        if in_flight_count > 50 {
+        // Increased from 50 to 300 to allow more concurrent header requests
+        if in_flight_count > 300 {
             debug!(
                 in_flight_count,
                 "Enough headers in flight, waiting for responses"

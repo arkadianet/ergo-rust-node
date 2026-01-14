@@ -510,8 +510,9 @@ impl Node {
             let mut reconnect_interval = tokio::time::interval(std::time::Duration::from_secs(10));
             reconnect_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-            // Block sync check interval (every 1 second for faster pipeline filling)
-            let mut block_sync_interval = tokio::time::interval(std::time::Duration::from_secs(1));
+            // Block sync check interval (every 200ms for faster pipeline refill)
+            let mut block_sync_interval =
+                tokio::time::interval(std::time::Duration::from_millis(200));
             block_sync_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
             while !shutdown_for_router.load(Ordering::SeqCst) {
@@ -795,8 +796,10 @@ impl Node {
                                     debug!(height = block_height, "Block is next in sequence, applying directly");
                                 } else if block_height > current_utxo_height + 1 {
                                     // Block arrived out of order - buffer it if we have space
-                                    // Limit buffer to 256 blocks (~128MB) to prevent memory bloat
-                                    const MAX_PENDING_BLOCKS: usize = 256;
+                                    // With 512 blocks in-flight arriving randomly, we need a large buffer
+                                    // to avoid dropping blocks and re-requesting them.
+                                    // 2048 blocks (~1GB max) handles out-of-order arrival with margin.
+                                    const MAX_PENDING_BLOCKS: usize = 2048;
                                     if pending_blocks.len() >= MAX_PENDING_BLOCKS {
                                         debug!(
                                             block_height,
