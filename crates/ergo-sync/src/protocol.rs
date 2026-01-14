@@ -427,9 +427,8 @@ pub struct SyncProtocol {
     command_tx: mpsc::Sender<SyncCommand>,
     /// Pending header IDs from Inv that we haven't requested yet.
     pending_header_inv: RwLock<VecDeque<Vec<u8>>>,
-    /// Header IDs we've requested but not yet received (in-flight).
-    /// Maps header_id -> (peer, request_timestamp) for per-peer tracking.
-    in_flight_headers: RwLock<HashMap<Vec<u8>, (PeerId, std::time::Instant)>>,
+    /// Header IDs we've requested but not yet received (in-flight), with request timestamp.
+    in_flight_headers: RwLock<HashMap<Vec<u8>, std::time::Instant>>,
     /// Header request timeout duration.
     header_timeout: std::time::Duration,
     /// Transaction IDs we've already processed (to avoid re-requesting).
@@ -495,15 +494,6 @@ const MIN_REQUEST_INTERVAL: std::time::Duration = std::time::Duration::from_mill
 /// Maximum number of header IDs to include in SyncInfo message.
 /// The Scala node samples ~100 headers from the chain for SyncInfo.
 const MAX_SYNC_HEADER_IDS: usize = 100;
-
-/// Maximum headers in-flight per peer to avoid overwhelming any single peer.
-const MAX_HEADERS_PER_PEER: usize = 100;
-
-/// Maximum total headers in-flight across all peers.
-const MAX_TOTAL_HEADERS_IN_FLIGHT: usize = 800;
-
-/// Maximum peers to use for parallel header requests.
-const MAX_HEADER_PEERS: usize = 8;
 
 impl PeerSyncState {
     fn new() -> Self {
@@ -1107,12 +1097,12 @@ impl SyncProtocol {
             // Only send request if we have IDs to request
             // Sending empty RequestModifier causes "empty inv list" error on Scala node
             if !ids_to_request.is_empty() {
-                // Track these as in-flight before sending request (with peer assignment)
+                // Track these as in-flight before sending request
                 if is_header_inv {
                     let now = std::time::Instant::now();
                     let mut in_flight = self.in_flight_headers.write();
                     for id in &ids_to_request {
-                        in_flight.insert(id.clone(), (peer.clone(), now));
+                        in_flight.insert(id.clone(), now);
                     }
                     drop(in_flight);
                 }
@@ -1529,39 +1519,6 @@ impl SyncProtocol {
             .map(|(id, _)| id.clone())
     }
 
-    /// Find all peers that we can send modifier requests to (respecting rate limits).
-    /// Returns up to `max_peers` peers, prioritizing peers with lower in-flight counts.
-    fn find_peers_for_requests(&self, max_peers: usize) -> Vec<PeerId> {
-        let peers = self.sync_peers.read();
-        let in_flight = self.in_flight_headers.read();
-
-        // Count in-flight requests per peer
-        let mut peer_counts: std::collections::HashMap<PeerId, usize> =
-            std::collections::HashMap::new();
-        for (_, (peer, _)) in in_flight.iter() {
-            *peer_counts.entry(peer.clone()).or_insert(0) += 1;
-        }
-
-        // Get peers that can accept requests, sorted by in-flight count (ascending)
-        let mut available: Vec<_> = peers
-            .iter()
-            .filter(|(_, state)| state.can_send_request())
-            .map(|(id, _)| {
-                let count = peer_counts.get(id).copied().unwrap_or(0);
-                (id.clone(), count)
-            })
-            .collect();
-
-        // Sort by in-flight count to balance load
-        available.sort_by_key(|(_, count)| *count);
-
-        available
-            .into_iter()
-            .take(max_peers)
-            .map(|(id, _)| id)
-            .collect()
-    }
-
     /// Try to apply pending headers that were waiting for the given parent.
     async fn try_apply_pending_headers(&self, parent_id: &[u8]) -> SyncResult<()> {
         // Find headers waiting for this parent using the efficient parent index (O(1) lookup)
@@ -1917,12 +1874,12 @@ impl SyncProtocol {
 
         // Check for header request timeouts and re-queue them
         let header_timeout = self.header_timeout;
-        let timed_out_headers: Vec<(Vec<u8>, PeerId)> = {
+        let timed_out_headers: Vec<Vec<u8>> = {
             let in_flight = self.in_flight_headers.read();
             in_flight
                 .iter()
-                .filter(|(_, (_, requested_at))| requested_at.elapsed() > header_timeout)
-                .map(|(id, (peer, _))| (id.clone(), peer.clone()))
+                .filter(|(_, requested_at)| requested_at.elapsed() > header_timeout)
+                .map(|(id, _)| id.clone())
                 .collect()
         };
 
@@ -1934,9 +1891,8 @@ impl SyncProtocol {
             // Remove from in-flight and add back to pending queue for retry
             let mut in_flight = self.in_flight_headers.write();
             let mut pending = self.pending_header_inv.write();
-            for (id, peer) in timed_out_headers {
+            for id in timed_out_headers {
                 in_flight.remove(&id);
-                debug!(id = hex::encode(&id), peer = %peer, "Header request timed out from peer");
                 // Evict from back if at capacity before pushing to front
                 if pending.len() >= MAX_PENDING_HEADER_INV {
                     pending.pop_back();
@@ -2072,26 +2028,13 @@ impl SyncProtocol {
     }
 
     /// Request more headers if we're behind and not currently waiting for any.
-    /// Distributes requests across multiple peers for parallel downloading.
+    /// Respects rate limits to avoid being banned by peers.
     async fn request_more_headers_if_needed(&self) -> SyncResult<()> {
         let our_height = self.synchronizer.our_height();
         let peer_height = self.synchronizer.best_peer_height().unwrap_or(0);
         let chain_len = self.header_chain.read().headers.len();
         let pending_inv_count = self.pending_header_inv.read().len();
-
-        // Count total and per-peer in-flight headers
-        let (total_in_flight, peer_in_flight_counts): (
-            usize,
-            std::collections::HashMap<PeerId, usize>,
-        ) = {
-            let in_flight = self.in_flight_headers.read();
-            let mut counts: std::collections::HashMap<PeerId, usize> =
-                std::collections::HashMap::new();
-            for (_, (peer, _)) in in_flight.iter() {
-                *counts.entry(peer.clone()).or_insert(0) += 1;
-            }
-            (in_flight.len(), counts)
-        };
+        let in_flight_count = self.in_flight_headers.read().len();
 
         let has_peers_with_headers_check = self
             .sync_peers
@@ -2103,26 +2046,25 @@ impl SyncProtocol {
         static REQ_TICK_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let tick_num = REQ_TICK_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-        if tick_num % 10 == 0 {
-            info!(
-                tick_num,
-                our_height,
-                peer_height,
-                chain_len,
-                pending_inv_count,
-                total_in_flight,
-                peer_count = peer_in_flight_counts.len(),
-                pending_headers = self.pending_headers.read().len(),
-                has_peers_with_headers = has_peers_with_headers_check,
-                "Parallel header request tick"
-            );
-        }
+        info!(
+            tick_num,
+            our_height,
+            peer_height,
+            chain_len,
+            pending_inv_count,
+            in_flight_count,
+            pending_headers = self.pending_headers.read().len(),
+            has_peers_with_headers = has_peers_with_headers_check,
+            "request_more_headers tick"
+        );
 
-        // Don't request more headers if we have enough in flight globally
-        if total_in_flight >= MAX_TOTAL_HEADERS_IN_FLIGHT {
+        // Don't request more headers if we have enough in flight
+        // (timeouts are handled separately in on_tick via header_timeout)
+        // Increased from 50 to 300 to allow more concurrent header requests
+        if in_flight_count > 300 {
             debug!(
-                total_in_flight,
-                "Enough headers in flight globally, waiting for responses"
+                in_flight_count,
+                "Enough headers in flight, waiting for responses"
             );
             return Ok(());
         }
@@ -2142,43 +2084,19 @@ impl SyncProtocol {
             }
         }
 
-        // If we have pending Inv IDs, distribute them across multiple peers
+        // If we have pending Inv IDs, try to request them (respecting rate limits)
         if pending_inv_count > 0 {
-            let available_peers = self.find_peers_for_requests(MAX_HEADER_PEERS);
+            if let Some(peer) = self.find_peer_for_request() {
+                const MAX_REQUEST_SIZE: usize = 400;
 
-            if available_peers.is_empty() {
-                debug!("No peers available for header requests (all rate limited)");
-                return Ok(());
-            }
-
-            const MAX_REQUEST_SIZE: usize = 400; // Scala node limit per request
-
-            for peer in &available_peers {
-                // Check per-peer limit
-                let peer_in_flight = peer_in_flight_counts.get(peer).copied().unwrap_or(0);
-                if peer_in_flight >= MAX_HEADERS_PER_PEER {
-                    continue;
-                }
-
-                // Calculate how many to request from this peer
-                let peer_capacity = MAX_HEADERS_PER_PEER.saturating_sub(peer_in_flight);
-                let request_count = peer_capacity.min(MAX_REQUEST_SIZE);
-
-                if request_count == 0 {
-                    continue;
-                }
-
-                // Take IDs from pending queue, filtering already-stored and already in-flight
-                let ids_to_request: Vec<Vec<u8>> = {
+                // Filter out already-stored headers to avoid requesting duplicates
+                let pending_ids: Vec<Vec<u8>> = {
                     let stored = self.stored_headers.read();
-                    let in_flight = self.in_flight_headers.read();
                     let mut pending = self.pending_header_inv.write();
                     let mut ids = Vec::new();
-
-                    while ids.len() < request_count && !pending.is_empty() {
+                    while ids.len() < MAX_REQUEST_SIZE && !pending.is_empty() {
                         if let Some(id) = pending.pop_front() {
-                            // Skip if already stored or already in-flight
-                            if !stored.contains(&id) && !in_flight.contains_key(&id) {
+                            if !stored.contains(&id) {
                                 ids.push(id);
                             }
                         }
@@ -2186,41 +2104,36 @@ impl SyncProtocol {
                     ids
                 };
 
-                if ids_to_request.is_empty() {
-                    continue;
-                }
+                if !pending_ids.is_empty() {
+                    info!(
+                        our_height,
+                        pending = pending_ids.len(),
+                        remaining = self.pending_header_inv.read().len(),
+                        "Requesting pending headers from Inv queue (tick)"
+                    );
 
-                info!(
-                    peer = %peer,
-                    count = ids_to_request.len(),
-                    peer_in_flight,
-                    total_in_flight,
-                    remaining_pending = self.pending_header_inv.read().len(),
-                    "Requesting headers from peer (parallel)"
-                );
-
-                // Track as in-flight with peer assignment
-                {
-                    let now = std::time::Instant::now();
-                    let mut in_flight = self.in_flight_headers.write();
-                    for id in &ids_to_request {
-                        in_flight.insert(id.clone(), (peer.clone(), now));
+                    // Track as in-flight with timestamp
+                    {
+                        let now = std::time::Instant::now();
+                        let mut in_flight = self.in_flight_headers.write();
+                        for id in &pending_ids {
+                            in_flight.insert(id.clone(), now);
+                        }
                     }
-                }
 
-                // Update last request time
-                if let Some(state) = self.sync_peers.write().get_mut(peer) {
-                    state.last_request_sent = std::time::Instant::now();
-                }
+                    // Update last request time
+                    if let Some(state) = self.sync_peers.write().get_mut(&peer) {
+                        state.last_request_sent = std::time::Instant::now();
+                    }
 
-                let request = ModifierRequest {
-                    type_id: ModifierType::Header.to_byte(),
-                    ids: ids_to_request,
-                };
-                self.send_to_peer(peer, Message::RequestModifier(request))
-                    .await?;
+                    let request = ModifierRequest {
+                        type_id: ModifierType::Header.to_byte(),
+                        ids: pending_ids,
+                    };
+                    self.send_to_peer(&peer, Message::RequestModifier(request))
+                        .await?;
+                }
             }
-
             return Ok(());
         }
 
@@ -2234,20 +2147,20 @@ impl SyncProtocol {
         // Send SyncInfo if we have peers and either:
         // - We're behind the peer (our_height < peer_height)
         // - We have no pending work (to discover more headers)
-        // - Every 5 ticks as a heartbeat to check for new headers
+        // - Every 10 ticks as a heartbeat to check for new headers
         static SYNC_TICK_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let sync_tick = SYNC_TICK_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let should_send_sync = has_peers
             && (our_height < peer_height
                 || peer_height == 0
-                || (pending_inv_count == 0 && total_in_flight == 0 && sync_tick % 5 == 0));
+                || (pending_inv_count == 0 && in_flight_count == 0 && sync_tick % 5 == 0));
 
         if should_send_sync {
             // Find a peer that we can send SyncInfo to (respecting rate limits)
             if let Some(peer) = self.find_peer_for_sync() {
                 info!(
                     our_height,
-                    peer_height, chain_len, "Sending SyncInfo V2 to discover headers"
+                    peer_height, chain_len, "Sending SyncInfo V2 to request more headers"
                 );
 
                 // Update last sync time
