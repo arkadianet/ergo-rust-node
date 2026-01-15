@@ -361,20 +361,28 @@ impl Node {
                 "Enabling sync mode - index maintenance disabled for faster sync"
             );
             self.state.utxo.set_sync_mode(true);
+            self.storage.set_sync_mode(true);
         }
         if header_height > 0 {
             // Set the synchronizer's height to our stored header height
             sync_protocol.set_height(header_height);
 
-            // Load ALL stored header IDs so sync protocol knows what we already have
-            match self.state.get_headers(1, header_height) {
-                Ok(headers) if !headers.is_empty() => {
+            // Only load the most recent 50,000 header IDs (matching STORED_HEADERS_CACHE_SIZE in protocol.rs)
+            // This is much more memory efficient than loading all headers
+            const HEADER_IDS_TO_LOAD: u32 = 50_000;
+            let start_height = header_height.saturating_sub(HEADER_IDS_TO_LOAD).max(1);
+            let count = header_height - start_height + 1;
+
+            match self.state.get_header_ids(start_height, count) {
+                Ok(header_ids) if !header_ids.is_empty() => {
                     info!(
-                        "Loading {} stored headers into sync protocol",
-                        headers.len()
+                        "Loading {} recent header IDs into sync protocol (heights {}-{})",
+                        header_ids.len(),
+                        start_height,
+                        header_height
                     );
                     let all_header_ids: Vec<Vec<u8>> =
-                        headers.iter().map(|h| h.id.0.as_ref().to_vec()).collect();
+                        header_ids.iter().map(|id| id.0.as_ref().to_vec()).collect();
 
                     // Get exponentially spaced locator for SyncInfo messages
                     let locator_ids = match self.state.get_header_locator() {
@@ -392,14 +400,19 @@ impl Node {
                     // Get headers at V2 SyncInfo offsets: [0, 16, 128, 512] from best height
                     // These are sent in newest-first order (offset 0 = best header first)
                     // The Scala node uses these specific offsets for commonPoint detection
+                    // Only load the specific headers we need (4 headers max)
                     const V2_SYNC_OFFSETS: [u32; 4] = [0, 16, 128, 512];
                     let v2_headers: Vec<_> = V2_SYNC_OFFSETS
                         .iter()
                         .filter_map(|offset| {
                             let target_height = header_height.saturating_sub(*offset);
                             if target_height > 0 {
-                                // Find header at this height in our loaded headers
-                                headers.iter().find(|h| h.height == target_height).cloned()
+                                // Load only the specific header we need
+                                self.state
+                                    .get_headers(target_height, 1)
+                                    .ok()?
+                                    .into_iter()
+                                    .next()
                             } else {
                                 None
                             }
@@ -421,7 +434,7 @@ impl Node {
                     );
                 }
                 Err(e) => {
-                    warn!("Failed to get headers from storage: {}", e);
+                    warn!("Failed to get header IDs from storage: {}", e);
                 }
             }
         }
@@ -467,6 +480,8 @@ impl Node {
         let shutdown_for_router = shutdown.clone();
         let sync_event_tx_clone = sync_event_tx.clone();
         let state_for_router = Arc::clone(&self.state);
+        let storage_for_router = Arc::clone(&self.storage);
+        let sync_protocol_for_router = Arc::clone(&sync_protocol);
 
         // Track peer addresses for reconnection
         let mut peer_addresses: HashMap<PeerId, SocketAddr> = HashMap::new();
@@ -496,8 +511,9 @@ impl Node {
             let mut reconnect_interval = tokio::time::interval(std::time::Duration::from_secs(10));
             reconnect_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-            // Block sync check interval (every 1 second for faster pipeline filling)
-            let mut block_sync_interval = tokio::time::interval(std::time::Duration::from_secs(1));
+            // Block sync check interval (every 200ms for faster pipeline refill)
+            let mut block_sync_interval =
+                tokio::time::interval(std::time::Duration::from_millis(200));
             block_sync_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
             while !shutdown_for_router.load(Ordering::SeqCst) {
@@ -509,13 +525,19 @@ impl Node {
                     }
                     // Periodic block sync check - triggers block downloads when headers are ahead
                     _ = block_sync_interval.tick() => {
-                        let (utxo_height, header_height) = state_for_router.heights();
+                        let (utxo_height, db_header_height) = state_for_router.heights();
+                        // Use the protocol's best header height which includes in-memory headers
+                        // that haven't been flushed to the database yet. This prevents block
+                        // downloads from stalling when blocks catch up to stored headers.
+                        let protocol_header_height = sync_protocol_for_router.best_header_height();
+                        let header_height = db_header_height.max(protocol_header_height);
+
                         // Only trigger if we have headers ahead of our UTXO state
                         // and there's a meaningful gap (at least 1 block behind)
                         if header_height > utxo_height && header_height > 0 {
                             // Request next batch of blocks starting from current UTXO height + 1
-                            // Use batch of 64 to better fill the download pipeline
-                            let batch_size = 64.min(header_height - utxo_height) as u32;
+                            // Use large batch (512) to fill the download pipeline
+                            let batch_size = 512.min(header_height - utxo_height) as u32;
                             match state_for_router.get_headers(utxo_height + 1, batch_size) {
                                 Ok(headers) if !headers.is_empty() => {
                                     info!(
@@ -725,6 +747,18 @@ impl Node {
                                             "Batch of {} headers stored in state",
                                             count
                                         );
+                                        // Enable sync mode dynamically if we're far behind
+                                        let (utxo_height, header_height) = state_for_router.heights();
+                                        if !state_for_router.utxo.is_sync_mode() && header_height > utxo_height + 1000 {
+                                            info!(
+                                                utxo_height,
+                                                header_height,
+                                                blocks_behind = header_height - utxo_height,
+                                                "Enabling sync mode - far behind, disabling index maintenance"
+                                            );
+                                            state_for_router.utxo.set_sync_mode(true);
+                                            storage_for_router.set_sync_mode(true);
+                                        }
                                         Ok(())
                                     }
                                     Err(e) => {
@@ -769,8 +803,10 @@ impl Node {
                                     debug!(height = block_height, "Block is next in sequence, applying directly");
                                 } else if block_height > current_utxo_height + 1 {
                                     // Block arrived out of order - buffer it if we have space
-                                    // Limit buffer to 256 blocks (~128MB) to prevent memory bloat
-                                    const MAX_PENDING_BLOCKS: usize = 256;
+                                    // With 512 blocks in-flight arriving randomly, we need a large buffer
+                                    // to avoid dropping blocks and re-requesting them.
+                                    // 2048 blocks (~1GB max) handles out-of-order arrival with margin.
+                                    const MAX_PENDING_BLOCKS: usize = 2048;
                                     if pending_blocks.len() >= MAX_PENDING_BLOCKS {
                                         debug!(
                                             block_height,
@@ -1109,24 +1145,29 @@ impl Node {
                                 // After processing, request more blocks if we're still behind
                                 let (utxo_height, header_height) = state_for_router.heights();
 
-                                // Check if we've caught up - disable sync mode if within 10 blocks
-                                if state_for_router.utxo.is_sync_mode() {
-                                    let blocks_behind = header_height.saturating_sub(utxo_height);
-                                    if blocks_behind <= 10 {
-                                        info!(
-                                            utxo_height,
-                                            header_height,
-                                            "Sync complete - disabling sync mode, index maintenance resumed"
-                                        );
-                                        state_for_router.utxo.set_sync_mode(false);
-                                        // Note: Indexes will be rebuilt incrementally as new blocks arrive
-                                        // For a full rebuild, could spawn a background task here
-                                    }
+                                // Check if we've caught up - disable sync mode only when fully synced
+                                // AND we're at a reasonable height (> 1M blocks for mainnet).
+                                // This prevents toggling sync mode on/off during early sync when
+                                // blocks temporarily catch up to headers before more headers arrive.
+                                const MIN_HEIGHT_FOR_SYNC_COMPLETE: u32 = 1_000_000;
+                                let is_reasonably_synced = state_for_router.is_synced()
+                                    && header_height > MIN_HEIGHT_FOR_SYNC_COMPLETE;
+                                if state_for_router.utxo.is_sync_mode() && is_reasonably_synced {
+                                    info!(
+                                        utxo_height,
+                                        header_height,
+                                        "Sync complete - disabling sync mode, index maintenance resumed"
+                                    );
+                                    state_for_router.utxo.set_sync_mode(false);
+                                    storage_for_router.set_sync_mode(false);
+                                    // Note: Indexes will be rebuilt incrementally as new blocks arrive
+                                    // For a full rebuild, could spawn a background task here
                                 }
 
                                 if utxo_height < header_height {
                                     // Get next batch of headers to download blocks for
-                                    let batch_size = 16.min(header_height - utxo_height) as u32;
+                                    // Use larger batch (256) to keep download pipeline full
+                                    let batch_size = 256.min(header_height - utxo_height) as u32;
                                     match state_for_router.get_headers(utxo_height + 1, batch_size) {
                                         Ok(headers) if !headers.is_empty() => {
                                             debug!(
@@ -1499,10 +1540,14 @@ impl Node {
 
     /// Periodic tick.
     async fn tick(&self) {
-        // Log stats periodically
-        static COUNTER: AtomicBool = AtomicBool::new(false);
+        use std::sync::atomic::AtomicU64;
 
-        if !COUNTER.swap(true, Ordering::SeqCst) {
+        // Tick counter for periodic logging
+        static TICK_COUNT: AtomicU64 = AtomicU64::new(0);
+        let tick = TICK_COUNT.fetch_add(1, Ordering::Relaxed);
+
+        // Log node status every 30 seconds
+        if tick % 30 == 0 {
             let (utxo_height, header_height) = self.state.heights();
             let mempool_stats = self.mempool.stats();
             let peer_count = self.peers.connected_count();
@@ -1514,6 +1559,11 @@ impl Node {
                 peers = peer_count,
                 "Node status"
             );
+        }
+
+        // Log RocksDB memory stats every 60 seconds
+        if tick % 60 == 0 {
+            self.storage.log_memory_stats();
         }
     }
 

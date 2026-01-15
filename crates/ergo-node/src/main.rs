@@ -2,6 +2,10 @@
 //!
 //! This is the main entry point for the ergo-node binary.
 
+#[cfg(feature = "dhat-heap")]
+#[global_allocator]
+static ALLOC: dhat::Alloc = dhat::Alloc;
+
 use anyhow::Result;
 use clap::Parser;
 use std::path::PathBuf;
@@ -66,6 +70,9 @@ pub struct Args {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    #[cfg(feature = "dhat-heap")]
+    let _profiler = dhat::Profiler::new_heap();
+
     let args = Args::parse();
 
     if args.version_info {
@@ -108,16 +115,35 @@ async fn main() -> Result<()> {
 
     // Handle shutdown signals
     let node_handle = node.clone();
-    tokio::spawn(async move {
+    let shutdown_signal = async move {
         tokio::signal::ctrl_c().await.ok();
         info!("Shutdown signal received");
         node_handle.shutdown().await;
-    });
+    };
 
-    // Run the node
-    node.run().await?;
+    // Run the node until shutdown
+    tokio::select! {
+        result = node.run() => {
+            if let Err(e) = result {
+                tracing::error!("Node error: {}", e);
+            }
+        }
+        _ = shutdown_signal => {
+            info!("Shutdown complete");
+        }
+    }
 
     info!("Ergo node stopped");
+
+    // Drop node explicitly before profiler
+    drop(node);
+
+    #[cfg(feature = "dhat-heap")]
+    {
+        info!("Writing DHAT profiler output...");
+        // _profiler will be dropped here, writing the output
+    }
+
     Ok(())
 }
 

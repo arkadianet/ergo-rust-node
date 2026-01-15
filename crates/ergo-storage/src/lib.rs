@@ -26,7 +26,7 @@ pub mod indexer;
 pub mod scan;
 
 pub use batch::WriteBatch;
-pub use database::{ColumnFamily, Database};
+pub use database::{ColumnFamily, Database, RocksDbMemoryStats};
 pub use error::{StorageError, StorageResult};
 pub use indexer::{
     BalanceInfo, ExtraIndexer, IndexedErgoAddress, IndexedErgoBox, IndexedErgoTransaction,

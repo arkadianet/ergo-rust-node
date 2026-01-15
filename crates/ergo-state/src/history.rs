@@ -173,6 +173,27 @@ impl HeaderStore {
         }
         Ok(headers)
     }
+
+    /// Get header IDs in a range without loading full headers.
+    /// This is much more memory efficient for bulk operations.
+    pub fn get_ids_range(&self, from_height: u32, count: u32) -> StateResult<Vec<BlockId>> {
+        let mut ids = Vec::with_capacity(count as usize);
+        for height in from_height..from_height.saturating_add(count) {
+            let height_key = height.to_be_bytes();
+            match self.storage.get(columns::HEADER_CHAIN, &height_key)? {
+                Some(id_bytes) => {
+                    if id_bytes.len() != 32 {
+                        return Err(StateError::Serialization("Invalid block ID length".into()));
+                    }
+                    let mut arr = [0u8; 32];
+                    arr.copy_from_slice(&id_bytes);
+                    ids.push(BlockId(Digest32::from(arr)));
+                }
+                None => break,
+            }
+        }
+        Ok(ids)
+    }
 }
 
 /// Block body storage (transactions, extension, AD proofs).

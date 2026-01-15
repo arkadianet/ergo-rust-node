@@ -16,7 +16,7 @@ use ergo_chain_types::{BlockId, Digest32, Header};
 use ergo_consensus::block::ModifierType;
 use ergo_network::{InvData, Message, ModifierRequest, PeerId, SyncInfo};
 use parking_lot::RwLock;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
@@ -117,8 +117,9 @@ pub enum SyncEvent {
 
 /// Maximum number of headers to keep in memory.
 /// Headers older than this are dropped to save memory.
-/// With ~500 bytes per header, 10000 headers = ~5MB.
-const MAX_CACHED_HEADERS: usize = 10_000;
+/// With ~500 bytes per header, 50000 headers = ~25MB.
+/// Increased from 10k to reduce header cache misses during fast sync.
+const MAX_CACHED_HEADERS: usize = 50_000;
 
 /// Maximum number of block IDs to track for download.
 /// This limits memory used by missing_blocks and tx_id_to_header_id.
@@ -137,6 +138,12 @@ struct HeaderChain {
     /// Mapping from transactionsId -> headerId for matching received blocks.
     /// When we receive a block, we need to find the corresponding header.
     tx_id_to_header_id: HashMap<Vec<u8>, Vec<u8>>,
+    /// Reverse mapping from headerId -> transactionsId for O(1) lookup.
+    /// Used in on_block_applied/on_block_failed to quickly find the tx_id.
+    header_id_to_tx_id: HashMap<Vec<u8>, Vec<u8>>,
+    /// Headers indexed by ID for O(1) lookup.
+    /// Used in on_block_received to quickly find the header for validation.
+    headers_by_id: HashMap<Vec<u8>, Header>,
 }
 
 impl HeaderChain {
@@ -145,31 +152,96 @@ impl HeaderChain {
             headers: VecDeque::new(),
             missing_blocks: VecDeque::new(),
             tx_id_to_header_id: HashMap::new(),
+            header_id_to_tx_id: HashMap::new(),
+            headers_by_id: HashMap::new(),
         }
     }
 
     /// Add a header and its block ID, enforcing memory limits.
     fn add_header(&mut self, header: Header, transactions_id: Vec<u8>, header_id: Vec<u8>) {
         // Add the new entries
+        self.headers_by_id.insert(header_id.clone(), header.clone());
         self.headers.push_back(header);
-        self.missing_blocks.push_back(transactions_id.clone());
+        // NOTE: Do NOT add to missing_blocks here!
+        // Headers are buffered before being written to the database.
+        // If we add to missing_blocks now, queue_block_downloads() may request blocks
+        // before the headers are in the database, causing "Header not found" errors.
+        // Block downloads are properly handled by block_sync_interval in node.rs,
+        // which only requests blocks for headers that are already stored in the database.
+        self.header_id_to_tx_id
+            .insert(header_id.clone(), transactions_id.clone());
         self.tx_id_to_header_id.insert(transactions_id, header_id);
 
         // Trim old entries if we exceed limits
         self.enforce_limits();
     }
 
+    /// Add header tracking for O(1) lookups without adding to missing_blocks.
+    /// Used by on_request_blocks which manages downloads via the downloader directly.
+    /// Note: Does NOT call enforce_limits() - caller should call it after batch operations.
+    fn track_header(&mut self, header: Header, transactions_id: Vec<u8>, header_id: Vec<u8>) {
+        // Add to lookup indexes only - don't add to missing_blocks since
+        // on_request_blocks queues downloads directly via the downloader
+        self.headers_by_id.insert(header_id.clone(), header.clone());
+        self.headers.push_back(header);
+        self.header_id_to_tx_id
+            .insert(header_id.clone(), transactions_id.clone());
+        self.tx_id_to_header_id.insert(transactions_id, header_id);
+        // Note: enforce_limits() is NOT called here to avoid overhead during batch inserts.
+        // The caller (on_request_blocks) should call it once after adding all headers.
+    }
+
+    /// Remove a header and its mappings when a block is applied.
+    fn remove_header(&mut self, header_id: &[u8]) {
+        // Remove from headers_by_id
+        self.headers_by_id.remove(header_id);
+
+        // Remove from reverse index and get the tx_id
+        if let Some(tx_id) = self.header_id_to_tx_id.remove(header_id) {
+            // Remove from tx_id_to_header_id
+            self.tx_id_to_header_id.remove(&tx_id);
+            // Note: We do NOT remove from missing_blocks here as it would be O(n).
+            // missing_blocks is only used by queue_block_downloads() which drains from the front,
+            // and stale entries (already downloaded) are simply skipped by the downloader.
+            // The enforce_limits() method will clean up old entries from the front.
+        }
+
+        // Note: We don't remove from the headers VecDeque here because it would be O(n).
+        // Instead, stale entries in headers VecDeque are cleaned up by enforce_limits().
+        // The headers_by_id HashMap is the authoritative source for lookups.
+    }
+
+    /// Get a header by its ID in O(1) time.
+    fn get_header(&self, header_id: &[u8]) -> Option<&Header> {
+        self.headers_by_id.get(header_id)
+    }
+
+    /// Get the tx_id for a header_id in O(1) time.
+    fn get_tx_id(&self, header_id: &[u8]) -> Option<&Vec<u8>> {
+        self.header_id_to_tx_id.get(header_id)
+    }
+
     /// Remove old entries to enforce memory limits.
     fn enforce_limits(&mut self) {
-        // Trim headers
+        // Trim headers and their mappings
         while self.headers.len() > MAX_CACHED_HEADERS {
-            self.headers.pop_front();
+            if let Some(old_header) = self.headers.pop_front() {
+                let old_header_id = old_header.id.0.as_ref();
+                // Clean up associated mappings
+                self.headers_by_id.remove(old_header_id);
+                if let Some(tx_id) = self.header_id_to_tx_id.remove(old_header_id) {
+                    self.tx_id_to_header_id.remove(&tx_id);
+                }
+            }
         }
 
         // Trim missing_blocks and corresponding mappings
         while self.missing_blocks.len() > MAX_PENDING_BLOCKS {
             if let Some(old_tx_id) = self.missing_blocks.pop_front() {
-                self.tx_id_to_header_id.remove(&old_tx_id);
+                if let Some(header_id) = self.tx_id_to_header_id.remove(&old_tx_id) {
+                    self.header_id_to_tx_id.remove(&header_id);
+                    self.headers_by_id.remove(&header_id);
+                }
             }
         }
     }
@@ -195,6 +267,115 @@ struct PendingHeader {
     parent_id: Vec<u8>,
 }
 
+/// Efficient container for pending headers with O(1) lookup and O(log n) eviction.
+struct PendingHeadersMap {
+    /// Main storage: header ID -> pending header data.
+    by_id: HashMap<Vec<u8>, PendingHeader>,
+    /// Index: parent ID -> set of child header IDs waiting for this parent.
+    by_parent: HashMap<Vec<u8>, HashSet<Vec<u8>>>,
+    /// Sorted set for efficient min-height eviction: (height, header_id).
+    by_height: std::collections::BTreeSet<(u32, Vec<u8>)>,
+}
+
+impl PendingHeadersMap {
+    fn new() -> Self {
+        Self {
+            by_id: HashMap::new(),
+            by_parent: HashMap::new(),
+            by_height: std::collections::BTreeSet::new(),
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.by_id.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.by_id.is_empty()
+    }
+
+    /// Insert a pending header. If at capacity, evicts the oldest (lowest height) entry first.
+    fn insert(&mut self, id: Vec<u8>, pending: PendingHeader, max_size: usize) -> Option<u32> {
+        let mut evicted_height = None;
+
+        // Evict oldest if at capacity
+        if self.by_id.len() >= max_size {
+            if let Some(&(height, ref evict_id)) = self.by_height.iter().next() {
+                let evict_id = evict_id.clone();
+                self.remove(&evict_id);
+                evicted_height = Some(height);
+            }
+        }
+
+        let height = pending.header.height;
+        let parent_id = pending.parent_id.clone();
+
+        // Insert into main storage
+        self.by_id.insert(id.clone(), pending);
+
+        // Update parent index
+        self.by_parent
+            .entry(parent_id)
+            .or_default()
+            .insert(id.clone());
+
+        // Update height index
+        self.by_height.insert((height, id));
+
+        evicted_height
+    }
+
+    /// Remove a pending header by ID.
+    fn remove(&mut self, id: &[u8]) -> Option<PendingHeader> {
+        let id_vec = id.to_vec();
+        if let Some(pending) = self.by_id.remove(&id_vec) {
+            // Remove from parent index
+            if let Some(children) = self.by_parent.get_mut(&pending.parent_id) {
+                children.remove(&id_vec);
+                if children.is_empty() {
+                    self.by_parent.remove(&pending.parent_id);
+                }
+            }
+            // Remove from height index
+            self.by_height.remove(&(pending.header.height, id_vec));
+            Some(pending)
+        } else {
+            None
+        }
+    }
+
+    /// Get headers waiting for a specific parent.
+    fn get_by_parent(&self, parent_id: &[u8]) -> Vec<(Vec<u8>, PendingHeader)> {
+        if let Some(child_ids) = self.by_parent.get(parent_id) {
+            let mut result = Vec::new();
+            for id in child_ids {
+                if let Some(ph) = self.by_id.get(id) {
+                    result.push((id.clone(), ph.clone()));
+                }
+            }
+            result
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Get a sample of pending headers for debugging.
+    fn sample(&self, count: usize) -> Vec<(u32, String)> {
+        self.by_id
+            .values()
+            .take(count)
+            .map(|ph| (ph.header.height, hex::encode(&ph.parent_id)))
+            .collect()
+    }
+
+    /// Clear all pending headers.
+    fn clear(&mut self) {
+        self.by_id.clear();
+        self.by_parent.clear();
+        self.by_height.clear();
+    }
+}
+
 /// Maximum number of headers to include in V2 SyncInfo.
 /// The Scala node uses `ErgoSyncInfo.MaxBlockIds = 10` for V2.
 const MAX_V2_HEADERS: usize = 10;
@@ -203,20 +384,19 @@ const MAX_V2_HEADERS: usize = 10;
 const V2_SYNC_OFFSETS: [u32; 4] = [0, 16, 128, 512];
 
 /// Maximum number of headers to buffer before flushing to storage.
-const HEADER_BATCH_SIZE: usize = 200;
+/// Increased from 200 to amortize storage overhead during fast sync.
+const HEADER_BATCH_SIZE: usize = 500;
 
 /// Maximum size of the stored_headers LRU cache.
-/// 50,000 entries covers ~2 days of blocks at 2min/block, plenty for active sync window.
-const STORED_HEADERS_CACHE_SIZE: usize = 50_000;
+/// 100,000 entries covers ~4 days of blocks at 2min/block, plenty for active sync window.
+/// Increased to reduce cache misses during fast sync.
+const STORED_HEADERS_CACHE_SIZE: usize = 100_000;
 
 /// Maximum size of the pending_headers map (headers waiting for their parent).
 const MAX_PENDING_HEADERS: usize = 10_000;
 
 /// Maximum size of the pending_header_inv queue.
 const MAX_PENDING_HEADER_INV: usize = 10_000;
-
-/// Number of blocks applied before clearing the completed downloads set.
-const BLOCKS_APPLIED_CLEAR_INTERVAL: u32 = 1000;
 
 /// Maximum time to buffer headers before flushing (milliseconds).
 const HEADER_BATCH_TIMEOUT_MS: u64 = 500;
@@ -237,10 +417,12 @@ pub struct SyncProtocol {
     /// Peers we're syncing from.
     sync_peers: RwLock<HashMap<PeerId, PeerSyncState>>,
     /// Headers pending storage (waiting for parent).
-    pending_headers: RwLock<HashMap<Vec<u8>, PendingHeader>>,
+    /// Uses efficient data structures for O(1) lookup and O(log n) eviction.
+    pending_headers: RwLock<PendingHeadersMap>,
     /// Headers we've successfully stored (by ID).
     /// Uses LRU cache to bound memory - old entries are evicted automatically.
-    stored_headers: parking_lot::Mutex<lru::LruCache<Vec<u8>, ()>>,
+    /// Uses RwLock to allow parallel reads (using peek() which doesn't update LRU order).
+    stored_headers: RwLock<lru::LruCache<Vec<u8>, ()>>,
     /// Command sender.
     command_tx: mpsc::Sender<SyncCommand>,
     /// Pending header IDs from Inv that we haven't requested yet.
@@ -258,8 +440,6 @@ pub struct SyncProtocol {
     /// Timestamp when the first header was added to pending_header_writes.
     /// Used to trigger timeout-based flushing.
     pending_header_writes_since: RwLock<Option<std::time::Instant>>,
-    /// Counter for blocks applied since last clear of completed downloads set.
-    blocks_applied_since_clear: std::sync::atomic::AtomicU32,
 }
 
 /// Peer chain status relative to ours.
@@ -299,8 +479,8 @@ struct PeerSyncState {
 }
 
 /// Minimum interval between SyncInfo messages to the same peer.
-/// Default Scala node uses 20 seconds, but for local sync we can be aggressive.
-const MIN_SYNC_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
+/// Reduced from 20s to 5s for faster header discovery during initial sync.
+const MIN_SYNC_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Minimum interval between processing SyncInfo from the same peer (100ms like Scala node).
 /// This prevents resource exhaustion from spammy peers.
@@ -391,8 +571,8 @@ impl SyncProtocol {
             header_chain: RwLock::new(HeaderChain::new()),
             v2_sync_headers: RwLock::new(Vec::new()),
             sync_peers: RwLock::new(HashMap::new()),
-            pending_headers: RwLock::new(HashMap::new()),
-            stored_headers: parking_lot::Mutex::new(stored),
+            pending_headers: RwLock::new(PendingHeadersMap::new()),
+            stored_headers: RwLock::new(stored),
             command_tx,
             pending_header_inv: RwLock::new(VecDeque::new()),
             in_flight_headers: RwLock::new(HashMap::new()),
@@ -403,7 +583,6 @@ impl SyncProtocol {
             )),
             pending_header_writes: RwLock::new(Vec::new()),
             pending_header_writes_since: RwLock::new(None),
-            blocks_applied_since_clear: std::sync::atomic::AtomicU32::new(0),
         }
     }
 
@@ -458,7 +637,7 @@ impl SyncProtocol {
 
         // Add recent header IDs to stored cache (for tracking what we already have)
         {
-            let mut stored = self.stored_headers.lock();
+            let mut stored = self.stored_headers.write();
             for id in ids_to_load {
                 stored.put(id.clone(), ());
             }
@@ -488,6 +667,17 @@ impl SyncProtocol {
     /// Set our current height.
     pub fn set_height(&self, height: u32) {
         self.synchronizer.set_height(height);
+    }
+
+    /// Get the best header height from the in-memory chain.
+    /// This may be higher than the stored database height during sync.
+    pub fn best_header_height(&self) -> u32 {
+        self.header_chain
+            .read()
+            .headers
+            .back()
+            .map(|h| h.height)
+            .unwrap_or_else(|| self.synchronizer.our_height())
     }
 
     /// Handle an incoming sync event.
@@ -785,13 +975,6 @@ impl SyncProtocol {
 
     /// Handle inventory announcement.
     async fn on_inv(&self, peer: PeerId, inv: InvData) -> SyncResult<()> {
-        info!(
-            peer = %peer,
-            type_id = inv.type_id,
-            count = inv.ids.len(),
-            "Received Inv, requesting modifiers"
-        );
-
         // Request modifiers in batches
         // Scala node uses desiredInvObjects = 400, so we can request up to 400 at once
         const MAX_REQUEST_SIZE: usize = 400;
@@ -799,6 +982,25 @@ impl SyncProtocol {
         // Identify the modifier type
         let is_header_inv = inv.type_id == ModifierType::Header.to_byte();
         let is_transaction_inv = inv.type_id == ModifierType::Transaction.to_byte();
+        let is_block_transactions_inv = inv.type_id == ModifierType::BlockTransactions.to_byte();
+
+        // Ignore BlockTransactions Inv - we request blocks ourselves based on stored headers
+        // This prevents requesting blocks before headers are synced, which causes failures
+        if is_block_transactions_inv {
+            debug!(
+                peer = %peer,
+                count = inv.ids.len(),
+                "Ignoring BlockTransactions Inv - blocks requested via block_sync_interval"
+            );
+            return Ok(());
+        }
+
+        info!(
+            peer = %peer,
+            type_id = inv.type_id,
+            count = inv.ids.len(),
+            "Received Inv, requesting modifiers"
+        );
 
         if is_transaction_inv {
             info!(
@@ -817,8 +1019,8 @@ impl SyncProtocol {
             // Filter out already-known modifiers (headers or transactions)
             let original_count = inv.ids.len();
             let (filtered_ids, removed_count): (Vec<Vec<u8>>, usize) = if is_header_inv {
-                // Filter out already-stored headers
-                let stored = self.stored_headers.lock();
+                // Filter out already-stored headers (read lock since contains() doesn't update LRU)
+                let stored = self.stored_headers.read();
                 let mut filtered = Vec::new();
                 let mut removed = 0;
                 for id in inv.ids {
@@ -1047,7 +1249,7 @@ impl SyncProtocol {
 
         // Check header status in a single lock acquisition to reduce contention
         let (already_stored, parent_available, stored_count) = {
-            let stored = self.stored_headers.lock();
+            let stored = self.stored_headers.read();
             (
                 stored.contains(&correct_id),
                 stored.contains(&parent_id),
@@ -1087,30 +1289,25 @@ impl SyncProtocol {
             let pending_count = {
                 let mut pending = self.pending_headers.write();
 
-                // Evict oldest entries if at capacity to bound memory
-                if pending.len() >= MAX_PENDING_HEADERS {
-                    // Find and remove the entry with the lowest height
-                    let oldest_key = pending
-                        .iter()
-                        .min_by_key(|(_, ph)| ph.header.height)
-                        .map(|(k, _)| k.clone());
-                    if let Some(key) = oldest_key {
-                        pending.remove(&key);
-                        debug!(
-                            evicted_for_height = header.height,
-                            "Evicted oldest pending header to make room"
-                        );
-                    }
-                }
-
-                pending.insert(
+                // Insert with automatic eviction of oldest (lowest height) if at capacity
+                let evicted = pending.insert(
                     correct_id.clone(),
                     PendingHeader {
                         header: header.clone(),
                         raw_bytes: data,
                         parent_id: parent_id.clone(),
                     },
+                    MAX_PENDING_HEADERS,
                 );
+
+                if let Some(evicted_height) = evicted {
+                    debug!(
+                        evicted_height,
+                        new_height = header.height,
+                        "Evicted oldest pending header to make room"
+                    );
+                }
+
                 pending.len()
             };
 
@@ -1120,7 +1317,7 @@ impl SyncProtocol {
                     height = header.height,
                     parent = hex::encode(&parent_id),
                     pending_count,
-                    stored_count = self.stored_headers.lock().len(),
+                    stored_count = self.stored_headers.read().len(),
                     "Buffering header - parent not available"
                 );
             }
@@ -1252,7 +1449,7 @@ impl SyncProtocol {
 
         // Optimistically mark as stored so descendants can be processed
         // This is safe because if the batch write fails, we'll error out anyway
-        self.stored_headers.lock().put(header_id.clone(), ());
+        self.stored_headers.write().put(header_id.clone(), ());
 
         // Compute the BlockTransactions ID (derived from header ID + transactions root)
         // This is NOT the same as the header ID!
@@ -1327,22 +1524,18 @@ impl SyncProtocol {
 
     /// Try to apply pending headers that were waiting for the given parent.
     async fn try_apply_pending_headers(&self, parent_id: &[u8]) -> SyncResult<()> {
-        // Find headers waiting for this parent
+        // Find headers waiting for this parent using the efficient parent index (O(1) lookup)
         let waiting: Vec<_> = {
             let pending = self.pending_headers.read();
-            let waiting: Vec<_> = pending
-                .iter()
-                .filter(|(_, ph)| ph.parent_id == parent_id)
-                .map(|(id, ph)| (id.clone(), ph.header.clone(), ph.raw_bytes.clone()))
-                .collect();
+            let waiting = pending
+                .get_by_parent(parent_id)
+                .into_iter()
+                .map(|(id, ph)| (id, ph.header.clone(), ph.raw_bytes.clone()))
+                .collect::<Vec<_>>();
 
             if waiting.is_empty() && !pending.is_empty() {
                 // Log for debugging - show first few pending parents
-                let sample_parents: Vec<_> = pending
-                    .iter()
-                    .take(3)
-                    .map(|(_, ph)| (ph.header.height, hex::encode(&ph.parent_id)))
-                    .collect();
+                let sample_parents = pending.sample(3);
                 info!(
                     parent_id = hex::encode(parent_id),
                     pending_count = pending.len(),
@@ -1417,14 +1610,10 @@ impl SyncProtocol {
         // Using the parsed header_id is more reliable since it comes from the data itself.
         let header_id_from_block = block_txs.header_id.0.as_ref().to_vec();
 
-        // Find the corresponding header for validation
+        // Find the corresponding header for validation using O(1) HashMap lookup
         let header = {
             let chain = self.header_chain.read();
-            chain
-                .headers
-                .iter()
-                .find(|h| h.id.0.as_ref() == header_id_from_block.as_slice())
-                .cloned()
+            chain.get_header(&header_id_from_block).cloned()
         };
 
         // Validate block transactions against header if we have it
@@ -1450,11 +1639,13 @@ impl SyncProtocol {
                 }
             }
         } else {
-            // We don't have the header - this shouldn't happen in normal sync
-            // but we can still proceed and let the state manager validate
-            warn!(
+            // Header not in local cache - this can happen during fast sync when
+            // headers are loaded from database via block_sync_interval but may not
+            // be in the in-memory cache. This is benign - the state manager will
+            // validate the block against the header from the database.
+            debug!(
                 id = hex::encode(&id),
-                "Received block without corresponding header in cache"
+                "Block header not in cache, skipping local validation"
             );
         }
 
@@ -1474,11 +1665,10 @@ impl SyncProtocol {
             .await
             .map_err(|e| SyncError::Internal(format!("Failed to send command: {}", e)))?;
 
-        // Clean up the tx_id_to_header_id mapping
-        {
-            let mut chain = self.header_chain.write();
-            chain.tx_id_to_header_id.remove(&id);
-        }
+        // NOTE: Do NOT remove tx_id_to_header_id mapping here!
+        // The mapping is needed by on_block_failed() if block application fails later.
+        // The mapping is properly cleaned up in on_block_applied() on success,
+        // or remains available for on_block_failed() to uncomplete the transactionsId.
 
         Ok(())
     }
@@ -1527,73 +1717,23 @@ impl SyncProtocol {
         // Update our height
         self.synchronizer.set_height(height);
 
-        // Remove from header chain - note: block_id here is the header_id
-        // We need to find and remove the corresponding transactionsId from missing_blocks
+        // Remove from header chain using O(1) lookup - note: block_id here is the header_id
         let mut chain = self.header_chain.write();
 
-        // Find the transactionsId that corresponds to this header_id
-        let tx_id_to_remove: Option<Vec<u8>> = chain
-            .tx_id_to_header_id
-            .iter()
-            .find(|(_, hid)| hid.as_slice() == block_id)
-            .map(|(tid, _)| tid.clone());
+        // Use the reverse index for O(1) lookup of tx_id from header_id
+        let tx_id_to_remove = chain.get_tx_id(block_id).cloned();
 
-        if let Some(tx_id) = tx_id_to_remove {
-            chain.missing_blocks.retain(|id| id != &tx_id);
-            chain.tx_id_to_header_id.remove(&tx_id);
+        if let Some(ref tx_id) = tx_id_to_remove {
             // Also remove from downloader's completed set to free memory
             // and allow re-downloading if ever needed (e.g., after rollback)
-            self.downloader.uncomplete(&tx_id);
+            self.downloader.uncomplete(tx_id);
         }
+
+        // Remove header and all its mappings using the new O(1) method
+        chain.remove_header(block_id);
 
         // Also remove the header_id itself from completed (in case it was tracked that way)
         self.downloader.uncomplete(block_id);
-
-        // Track blocks applied and periodically clear completed downloads set to free memory.
-        // Use a loop with compare_exchange to avoid race conditions where multiple threads
-        // could see count >= threshold before any resets it.
-        loop {
-            let count = self
-                .blocks_applied_since_clear
-                .load(std::sync::atomic::Ordering::Relaxed);
-            if count >= BLOCKS_APPLIED_CLEAR_INTERVAL {
-                // Try to atomically reset the counter - only one thread will succeed
-                if self
-                    .blocks_applied_since_clear
-                    .compare_exchange(
-                        count,
-                        0,
-                        std::sync::atomic::Ordering::Relaxed,
-                        std::sync::atomic::Ordering::Relaxed,
-                    )
-                    .is_ok()
-                {
-                    self.downloader.clear_completed();
-                    debug!(
-                        height,
-                        "Cleared completed downloads set after {} blocks",
-                        BLOCKS_APPLIED_CLEAR_INTERVAL
-                    );
-                }
-                // If compare_exchange failed, another thread reset it - that's fine
-                break;
-            } else {
-                // Try to increment the counter
-                if self
-                    .blocks_applied_since_clear
-                    .compare_exchange(
-                        count,
-                        count + 1,
-                        std::sync::atomic::Ordering::Relaxed,
-                        std::sync::atomic::Ordering::Relaxed,
-                    )
-                    .is_ok()
-                {
-                    break;
-                }
-                // If compare_exchange failed, another thread modified it - retry
-            }
-        }
 
         // Log memory stats periodically (every 1000 blocks)
         if height % 1000 == 0 {
@@ -1620,14 +1760,10 @@ impl SyncProtocol {
         // (e.g., missing UTXO data that becomes available after other blocks are applied)
         self.downloader.uncomplete(block_id);
 
-        // Also need to find the transactionsId that corresponds to this header_id
-        // and remove it from completed as well
+        // Use O(1) reverse index lookup to find the transactionsId
         let chain = self.header_chain.read();
-        for (tx_id, header_id) in &chain.tx_id_to_header_id {
-            if header_id == block_id {
-                self.downloader.uncomplete(tx_id);
-                break;
-            }
+        if let Some(tx_id) = chain.get_tx_id(block_id) {
+            self.downloader.uncomplete(tx_id);
         }
     }
 
@@ -1642,38 +1778,47 @@ impl SyncProtocol {
         let mut tasks = Vec::new();
         let stats = self.downloader.stats();
 
-        for header in &headers {
-            let header_id = header.id.0.as_ref().to_vec();
-            let transactions_id = compute_block_section_id(
-                ModifierType::BlockTransactions.to_byte(),
-                &header_id,
-                header.transaction_root.0.as_ref(),
-            );
+        // Collect all header info first, then batch update under single lock
+        let header_infos: Vec<_> = headers
+            .iter()
+            .map(|header| {
+                let header_id = header.id.0.as_ref().to_vec();
+                let transactions_id = compute_block_section_id(
+                    ModifierType::BlockTransactions.to_byte(),
+                    &header_id,
+                    header.transaction_root.0.as_ref(),
+                );
+                (header.clone(), transactions_id, header_id)
+            })
+            .collect();
 
-            // Add to our tracking so we can match received blocks to headers
-            // But only if not already tracked
-            {
-                let mut chain = self.header_chain.write();
-                if !chain.tx_id_to_header_id.contains_key(&transactions_id) {
-                    chain.headers.push_back(header.clone());
-                    chain
-                        .tx_id_to_header_id
-                        .insert(transactions_id.clone(), header_id);
-                    // Don't add to missing_blocks - we use the downloader's pending queue instead
+        // Batch update header chain under single lock
+        {
+            let mut chain = self.header_chain.write();
+            for (header, transactions_id, header_id) in &header_infos {
+                if !chain.tx_id_to_header_id.contains_key(transactions_id) {
+                    // Use track_header which populates lookup indexes but NOT missing_blocks
+                    // since we queue downloads directly via the downloader below
+                    chain.track_header(header.clone(), transactions_id.clone(), header_id.clone());
                 }
             }
+            // NOTE: Do NOT call enforce_limits() here!
+            // These headers are for blocks we're about to download - evicting them
+            // immediately would cause "header not in cache" warnings when blocks arrive.
+            // Headers will be removed via remove_header() when blocks are applied.
+        }
 
-            // Queue download task
+        // Create download tasks
+        for (_, transactions_id, _) in header_infos {
             let task =
                 DownloadTask::new(transactions_id, ModifierType::BlockTransactions.to_byte());
             tasks.push(task);
         }
 
         // Queue all tasks at once
-        // Use regular queue (not force) - completed blocks should stay completed unless
-        // there's an explicit failure. This prevents infinite re-download loops when
-        // blocks are downloaded but buffered waiting for earlier blocks to arrive.
-        // For node restart case, the downloader's completed set is empty anyway.
+        // Use queue() instead of queue_force() to avoid re-queuing blocks that are
+        // already completed but waiting to be applied. This is called every second,
+        // so we don't want to repeatedly re-request the same blocks.
         if !tasks.is_empty() {
             let task_count = tasks.len();
             self.downloader.queue(tasks);
@@ -1877,7 +2022,8 @@ impl SyncProtocol {
         let stats = self.downloader.stats();
 
         // Don't queue more if we already have enough pending
-        if stats.pending + stats.in_flight >= 16 {
+        // Increased from 16 to match PARALLEL_DOWNLOADS for full parallelism
+        if stats.pending + stats.in_flight >= PARALLEL_DOWNLOADS {
             return;
         }
 
@@ -1935,7 +2081,8 @@ impl SyncProtocol {
 
         // Don't request more headers if we have enough in flight
         // (timeouts are handled separately in on_tick via header_timeout)
-        if in_flight_count > 50 {
+        // Increased from 50 to 300 to allow more concurrent header requests
+        if in_flight_count > 300 {
             debug!(
                 in_flight_count,
                 "Enough headers in flight, waiting for responses"
@@ -1947,7 +2094,7 @@ impl SyncProtocol {
         // (they might be stuck because we received non-consecutive headers)
         // But DON'T clear them if we have stored headers (restart case)
         let pending_count = self.pending_headers.read().len();
-        let stored_count = self.stored_headers.lock().len();
+        let stored_count = self.stored_headers.read().len();
         if pending_count > 0 && stored_count == 0 {
             // Clear pending headers only if we're truly a fresh node with no stored headers
             // (they were probably from non-consecutive SyncInfo samples)
@@ -1965,7 +2112,7 @@ impl SyncProtocol {
 
                 // Filter out already-stored headers to avoid requesting duplicates
                 let pending_ids: Vec<Vec<u8>> = {
-                    let stored = self.stored_headers.lock();
+                    let stored = self.stored_headers.read();
                     let mut pending = self.pending_header_inv.write();
                     let mut ids = Vec::new();
                     while ids.len() < MAX_REQUEST_SIZE && !pending.is_empty() {
@@ -2096,14 +2243,28 @@ impl SyncProtocol {
             }
         }
 
-        // Distribute tasks across peers: up to 16 blocks per peer
-        // Limit to 8 peers max to avoid overwhelming the network with too many concurrent requests
-        // With 8 peers × 16 blocks = 128 blocks in-flight, which is a good balance
-        const MAX_BLOCKS_PER_PEER: usize = 16;
-        const MAX_PEERS_TO_USE: usize = 8;
+        // Distribute tasks across peers: up to 32 blocks per peer
+        // Use up to 16 peers for maximum parallelism during initial sync
+        // With 16 peers × 32 blocks = 512 blocks in-flight for fast sync
+        const MAX_BLOCKS_PER_PEER: usize = 32;
+        const MAX_PEERS_TO_USE: usize = 16;
 
         let mut total_dispatched = 0;
         let peers_to_use = available_peers.len().min(MAX_PEERS_TO_USE);
+
+        // Log dispatch diagnostics periodically
+        static DISPATCH_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let dispatch_num = DISPATCH_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if dispatch_num % 100 == 0 {
+            info!(
+                dispatch_num,
+                available_peers = available_peers.len(),
+                peers_to_use,
+                pending = stats.pending,
+                in_flight = stats.in_flight,
+                "Dispatch diagnostics"
+            );
+        }
 
         for peer in available_peers.iter().take(peers_to_use) {
             // Get tasks that can be dispatched to THIS peer

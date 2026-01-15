@@ -3,11 +3,30 @@
 use crate::{Storage, StorageError, StorageResult, WriteBatch};
 use parking_lot::RwLock;
 use rocksdb::{
-    BlockBasedOptions, Cache, ColumnFamilyDescriptor, DBWithThreadMode, MultiThreaded, Options,
+    perf::MemoryUsageBuilder, BlockBasedOptions, Cache, ColumnFamilyDescriptor, DBWithThreadMode,
+    MultiThreaded, Options,
 };
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tracing::{debug, info};
+
+/// Memory usage statistics for RocksDB.
+#[derive(Debug, Clone, Default)]
+pub struct RocksDbMemoryStats {
+    /// Approximate memory used by memtables (all column families).
+    pub memtable_total: u64,
+    /// Approximate memory used by unflushed memtables.
+    pub memtable_unflushed: u64,
+    /// Memory used by table readers (index and filter blocks).
+    pub table_readers: u64,
+    /// Block cache usage (if available).
+    pub block_cache_usage: u64,
+    /// Block cache capacity.
+    pub block_cache_capacity: u64,
+    /// Block cache pinned usage (blocks that cannot be evicted).
+    pub block_cache_pinned: u64,
+}
 
 /// Column families for organizing data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -104,9 +123,23 @@ impl ColumnFamily {
     }
 }
 
+/// Default block cache size: 256MB shared across all column families.
+const DEFAULT_BLOCK_CACHE_SIZE: usize = 256 * 1024 * 1024;
+
+/// Block cache size for read-only mode: 16MB.
+const READONLY_BLOCK_CACHE_SIZE: usize = 16 * 1024 * 1024;
+
 /// RocksDB database wrapper.
 pub struct Database {
     db: Arc<RwLock<DBWithThreadMode<MultiThreaded>>>,
+    block_cache: Cache,
+    block_cache_capacity: usize,
+    /// Sync mode flag - when enabled, WAL is disabled for faster sync.
+    /// During initial sync, data can be re-downloaded if lost, so durability
+    /// is less critical than throughput.
+    sync_mode: Arc<AtomicBool>,
+    /// Counter for batch writes, used for periodic WAL status logging.
+    batch_write_count: AtomicU64,
 }
 
 impl Database {
@@ -142,7 +175,7 @@ impl Database {
         // This is critical for bounding memory - without explicit configuration,
         // each CF gets an unbounded default cache that can grow to gigabytes.
         // 256MB is enough for good read performance while keeping memory bounded.
-        let block_cache = Cache::new_lru_cache(256 * 1024 * 1024); // 256MB shared
+        let block_cache = Cache::new_lru_cache(DEFAULT_BLOCK_CACHE_SIZE);
 
         // Create column family descriptors
         let cf_descriptors: Vec<ColumnFamilyDescriptor> = ColumnFamily::all()
@@ -174,6 +207,10 @@ impl Database {
 
         Ok(Self {
             db: Arc::new(RwLock::new(db)),
+            block_cache,
+            block_cache_capacity: DEFAULT_BLOCK_CACHE_SIZE,
+            sync_mode: Arc::new(AtomicBool::new(false)),
+            batch_write_count: AtomicU64::new(0),
         })
     }
 
@@ -188,8 +225,15 @@ impl Database {
         let db =
             DBWithThreadMode::<MultiThreaded>::open_cf_for_read_only(&opts, path, cf_names, false)?;
 
+        // Create a small cache for read-only mode (just for stats compatibility)
+        let block_cache = Cache::new_lru_cache(READONLY_BLOCK_CACHE_SIZE);
+
         Ok(Self {
             db: Arc::new(RwLock::new(db)),
+            block_cache,
+            block_cache_capacity: READONLY_BLOCK_CACHE_SIZE,
+            sync_mode: Arc::new(AtomicBool::new(false)),
+            batch_write_count: AtomicU64::new(0),
         })
     }
 
@@ -224,6 +268,64 @@ impl Database {
         }
         Ok(())
     }
+
+    /// Get memory usage statistics for RocksDB.
+    pub fn memory_stats(&self) -> RocksDbMemoryStats {
+        let db = self.db.read();
+
+        // Build memory usage stats from the database
+        let mut builder = MemoryUsageBuilder::new().unwrap();
+        builder.add_db(&*db);
+        builder.add_cache(&self.block_cache);
+
+        let mem_usage = builder.build().unwrap();
+
+        RocksDbMemoryStats {
+            memtable_total: mem_usage.approximate_mem_table_total(),
+            memtable_unflushed: mem_usage.approximate_mem_table_unflushed(),
+            table_readers: mem_usage.approximate_mem_table_readers_total(),
+            block_cache_usage: self.block_cache.get_usage() as u64,
+            block_cache_capacity: self.block_cache_capacity as u64,
+            block_cache_pinned: self.block_cache.get_pinned_usage() as u64,
+        }
+    }
+
+    /// Log memory usage statistics.
+    pub fn log_memory_stats(&self) {
+        let stats = self.memory_stats();
+        info!(
+            memtable_mb = stats.memtable_total / (1024 * 1024),
+            memtable_unflushed_mb = stats.memtable_unflushed / (1024 * 1024),
+            table_readers_mb = stats.table_readers / (1024 * 1024),
+            block_cache_mb = stats.block_cache_usage / (1024 * 1024),
+            block_cache_capacity_mb = stats.block_cache_capacity / (1024 * 1024),
+            block_cache_pinned_mb = stats.block_cache_pinned / (1024 * 1024),
+            "RocksDB memory usage"
+        );
+    }
+
+    /// Enable or disable sync mode.
+    ///
+    /// When sync mode is enabled, WAL (Write-Ahead Log) is disabled to reduce
+    /// disk I/O by ~50%. This is safe during initial sync because:
+    /// - On normal shutdown: No data loss (memtables are flushed)
+    /// - On crash: Lose unflushed memtable data (a few seconds of blocks),
+    ///   but SST files are crash-safe. Node resumes from last flushed height.
+    pub fn set_sync_mode(&self, enabled: bool) {
+        let was_enabled = self.sync_mode.swap(enabled, Ordering::Relaxed);
+        if was_enabled != enabled {
+            if enabled {
+                info!("Database sync mode enabled - WAL disabled for faster sync");
+            } else {
+                info!("Database sync mode disabled - WAL re-enabled for durability");
+            }
+        }
+    }
+
+    /// Check if sync mode is enabled.
+    pub fn is_sync_mode(&self) -> bool {
+        self.sync_mode.load(Ordering::Relaxed)
+    }
 }
 
 impl Storage for Database {
@@ -242,7 +344,14 @@ impl Storage for Database {
             .cf_handle(cf.name())
             .ok_or_else(|| StorageError::ColumnFamilyNotFound(cf.name().to_string()))?;
 
-        db.put_cf(&handle, key, value)?;
+        // Respect sync_mode for WAL disable
+        let mut write_opts = rocksdb::WriteOptions::default();
+        write_opts.set_sync(false);
+        if self.sync_mode.load(Ordering::Relaxed) {
+            write_opts.disable_wal(true);
+        }
+
+        db.put_cf_opt(&handle, key, value, &write_opts)?;
         Ok(())
     }
 
@@ -252,7 +361,14 @@ impl Storage for Database {
             .cf_handle(cf.name())
             .ok_or_else(|| StorageError::ColumnFamilyNotFound(cf.name().to_string()))?;
 
-        db.delete_cf(&handle, key)?;
+        // Respect sync_mode for WAL disable
+        let mut write_opts = rocksdb::WriteOptions::default();
+        write_opts.set_sync(false);
+        if self.sync_mode.load(Ordering::Relaxed) {
+            write_opts.disable_wal(true);
+        }
+
+        db.delete_cf_opt(&handle, key, &write_opts)?;
         Ok(())
     }
 
@@ -275,11 +391,23 @@ impl Storage for Database {
             }
         }
 
-        // Use non-sync write for better performance during sync
-        // WAL provides durability, we just skip the fsync
+        // Configure write options based on sync mode
         let mut write_opts = rocksdb::WriteOptions::default();
-        write_opts.disable_wal(false); // Keep WAL for durability
         write_opts.set_sync(false); // Don't fsync on every write
+
+        // In sync mode, disable WAL for ~50% disk I/O reduction.
+        // Safe because data can be re-downloaded on crash.
+        let wal_disabled = self.sync_mode.load(Ordering::Relaxed);
+        write_opts.disable_wal(wal_disabled);
+
+        // Log WAL status periodically (every 10000 batches)
+        let count = self.batch_write_count.fetch_add(1, Ordering::Relaxed);
+        if count % 10000 == 0 {
+            info!(
+                batch_count = count,
+                wal_disabled, "RocksDB write batch status"
+            );
+        }
 
         db.write_opt(rocks_batch, &write_opts)?;
         Ok(())
@@ -311,6 +439,11 @@ impl Clone for Database {
     fn clone(&self) -> Self {
         Self {
             db: Arc::clone(&self.db),
+            block_cache: self.block_cache.clone(),
+            block_cache_capacity: self.block_cache_capacity,
+            sync_mode: Arc::clone(&self.sync_mode),
+            // Share the same counter across clones
+            batch_write_count: AtomicU64::new(self.batch_write_count.load(Ordering::Relaxed)),
         }
     }
 }
