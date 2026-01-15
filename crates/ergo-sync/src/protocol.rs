@@ -69,6 +69,13 @@ pub enum SyncCommand {
         block_id: Vec<u8>,
         block_data: Vec<u8>,
     },
+    /// Store a received extension.
+    StoreExtension {
+        /// Header ID this extension belongs to.
+        header_id: Vec<u8>,
+        /// Raw extension data.
+        extension_data: Vec<u8>,
+    },
     /// Add a transaction to the mempool.
     AddTransaction {
         tx_id: Vec<u8>,
@@ -1167,8 +1174,7 @@ impl SyncProtocol {
                 self.on_block_received(&peer, id, data).await?;
             }
             Some(ModifierType::Extension) => {
-                // Handle extension
-                debug!(id = hex::encode(&id), "Received extension");
+                self.on_extension_received(&peer, id, data).await?;
             }
             Some(ModifierType::ADProofs) => {
                 // Handle AD proofs
@@ -1671,6 +1677,60 @@ impl SyncProtocol {
         Ok(())
     }
 
+    /// Handle received extension.
+    ///
+    /// Extensions contain protocol parameters at epoch boundaries (every 1024 blocks).
+    /// We need to store them so parameters can be loaded on node restart.
+    async fn on_extension_received(
+        &self,
+        _peer: &PeerId,
+        id: Vec<u8>,
+        data: Vec<u8>,
+    ) -> SyncResult<()> {
+        use ergo_consensus::block::Extension;
+
+        debug!(
+            id = hex::encode(&id),
+            size = data.len(),
+            "Processing extension"
+        );
+
+        // Parse the extension to extract the header ID
+        let extension = match Extension::parse(&data) {
+            Ok(ext) => ext,
+            Err(e) => {
+                warn!(id = hex::encode(&id), error = ?e, "Failed to parse Extension");
+                // Mark as completed anyway to avoid re-requesting
+                self.downloader.complete(&id);
+                return Ok(());
+            }
+        };
+
+        let header_id = extension.header_id.0.as_ref().to_vec();
+
+        debug!(
+            extension_id = hex::encode(&id),
+            header_id = hex::encode(&header_id),
+            fields = extension.fields.len(),
+            "Parsed Extension"
+        );
+
+        // Mark as downloaded
+        self.downloader.complete(&id);
+
+        // Send command to store the extension
+        let cmd = SyncCommand::StoreExtension {
+            header_id,
+            extension_data: data,
+        };
+        self.command_tx
+            .send(cmd)
+            .await
+            .map_err(|e| SyncError::Internal(format!("Failed to send command: {}", e)))?;
+
+        Ok(())
+    }
+
     /// Handle received transaction.
     async fn on_transaction_received(
         &self,
@@ -1786,14 +1846,20 @@ impl SyncProtocol {
                     &header_id,
                     header.transaction_root.0.as_ref(),
                 );
-                (header.clone(), transactions_id, header_id)
+                // Compute extension ID from header ID and extension root
+                let extension_id = compute_block_section_id(
+                    ModifierType::Extension.to_byte(),
+                    &header_id,
+                    header.extension_root.0.as_ref(),
+                );
+                (header.clone(), transactions_id, extension_id, header_id)
             })
             .collect();
 
         // Batch update header chain under single lock
         {
             let mut chain = self.header_chain.write();
-            for (header, transactions_id, header_id) in &header_infos {
+            for (header, transactions_id, _extension_id, header_id) in &header_infos {
                 if !chain.tx_id_to_header_id.contains_key(transactions_id) {
                     // Use track_header which populates lookup indexes but NOT missing_blocks
                     // since we queue downloads directly via the downloader below
@@ -1806,11 +1872,16 @@ impl SyncProtocol {
             // Headers will be removed via remove_header() when blocks are applied.
         }
 
-        // Create download tasks
-        for (_, transactions_id, _) in header_infos {
-            let task =
+        // Create download tasks for both block transactions and extensions
+        for (_, transactions_id, extension_id, _) in header_infos {
+            // Request block transactions
+            let tx_task =
                 DownloadTask::new(transactions_id, ModifierType::BlockTransactions.to_byte());
-            tasks.push(task);
+            tasks.push(tx_task);
+
+            // Request extension (contains protocol parameters at epoch boundaries)
+            let ext_task = DownloadTask::new(extension_id, ModifierType::Extension.to_byte());
+            tasks.push(ext_task);
         }
 
         // Queue all tasks at once

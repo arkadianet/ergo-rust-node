@@ -11,7 +11,8 @@
 //! any state changes are applied.
 
 use crate::block::{BlockTransactions, FullBlock, Header};
-use crate::params::{MAX_BLOCK_COST, MAX_TX_COST, MIN_BOX_VALUE};
+use crate::chain_params::ChainParameters;
+use crate::params::MIN_BOX_VALUE;
 use crate::tx_validation::{validate_erg_conservation, validate_token_conservation, TxVerifier};
 use crate::{ConsensusError, ConsensusResult};
 use ergo_chain_types::PreHeader;
@@ -90,8 +91,8 @@ impl Checkpoint {
 
 /// Full block validator with ErgoScript execution.
 pub struct FullBlockValidator {
-    /// Maximum block cost allowed.
-    max_block_cost: u64,
+    /// Dynamic chain parameters (from block extensions).
+    parameters: ChainParameters,
     /// Whether to skip script verification (for testing only).
     skip_script_verification: bool,
     /// Optional checkpoint for fast initial sync.
@@ -105,11 +106,21 @@ impl Default for FullBlockValidator {
 }
 
 impl FullBlockValidator {
-    /// Create a new block validator with default settings.
+    /// Create a new block validator with default parameters.
     /// Uses mainnet checkpoint for fast initial sync.
     pub fn new() -> Self {
         Self {
-            max_block_cost: MAX_BLOCK_COST,
+            parameters: ChainParameters::default(),
+            skip_script_verification: false,
+            checkpoint: Some(Checkpoint::mainnet()),
+        }
+    }
+
+    /// Create a block validator with specific chain parameters.
+    /// This is the preferred constructor when parameters are available from state.
+    pub fn with_parameters(parameters: ChainParameters) -> Self {
+        Self {
+            parameters,
             skip_script_verification: false,
             checkpoint: Some(Checkpoint::mainnet()),
         }
@@ -118,7 +129,16 @@ impl FullBlockValidator {
     /// Create a block validator without checkpoint (full validation from genesis).
     pub fn without_checkpoint() -> Self {
         Self {
-            max_block_cost: MAX_BLOCK_COST,
+            parameters: ChainParameters::default(),
+            skip_script_verification: false,
+            checkpoint: None,
+        }
+    }
+
+    /// Create a block validator with parameters and no checkpoint.
+    pub fn with_parameters_no_checkpoint(parameters: ChainParameters) -> Self {
+        Self {
+            parameters,
             skip_script_verification: false,
             checkpoint: None,
         }
@@ -128,10 +148,15 @@ impl FullBlockValidator {
     #[cfg(test)]
     pub fn for_testing() -> Self {
         Self {
-            max_block_cost: MAX_BLOCK_COST,
+            parameters: ChainParameters::default(),
             skip_script_verification: true,
             checkpoint: None,
         }
+    }
+
+    /// Get the current max_block_cost parameter.
+    pub fn max_block_cost(&self) -> u64 {
+        self.parameters.max_block_cost
     }
 
     /// Check if a block is below the checkpoint height.
@@ -403,23 +428,26 @@ impl FullBlockValidator {
                             });
                         }
 
-                        // Check individual transaction cost limit
-                        if result.total_cost > MAX_TX_COST {
+                        // Check individual transaction cost limit against max_block_cost.
+                        // The Scala node uses maxBlockCost as the cost limit for each
+                        // transaction during block validation (not a separate per-tx limit).
+                        let max_tx_cost = self.parameters.max_block_cost;
+                        if result.total_cost > max_tx_cost {
                             return Err(ConsensusError::TransactionCostExceeded {
                                 tx_id: hex::encode(&tx_id),
                                 cost: result.total_cost,
-                                max: MAX_TX_COST,
+                                max: max_tx_cost,
                             });
                         }
 
                         // Accumulate cost
                         total_cost = total_cost.saturating_add(result.total_cost);
 
-                        // Check block cost limit
-                        if total_cost > self.max_block_cost {
+                        // Check cumulative block cost limit
+                        if total_cost > self.parameters.max_block_cost {
                             return Err(ConsensusError::BlockCostExceeded {
                                 cost: total_cost,
-                                max: self.max_block_cost,
+                                max: self.parameters.max_block_cost,
                             });
                         }
                     }
@@ -644,7 +672,11 @@ mod tests {
     #[test]
     fn test_validator_creation() {
         let validator = FullBlockValidator::new();
-        assert_eq!(validator.max_block_cost, MAX_BLOCK_COST);
+        // Default parameters use 1_000_000 as genesis default
+        assert_eq!(
+            validator.max_block_cost(),
+            ChainParameters::default().max_block_cost
+        );
         assert!(!validator.skip_script_verification);
     }
 

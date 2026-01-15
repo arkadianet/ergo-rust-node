@@ -320,6 +320,68 @@ impl BlockStore {
         Ok(())
     }
 
+    /// Deserialize extension from bytes.
+    fn deserialize_extension(block_id: BlockId, bytes: &[u8]) -> StateResult<Extension> {
+        use ergo_consensus::block::ExtensionField;
+
+        if bytes.len() < 4 {
+            return Err(crate::StateError::Serialization(
+                "Extension data too short".to_string(),
+            ));
+        }
+
+        let field_count = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
+        let mut offset = 4;
+        let mut fields = Vec::with_capacity(field_count);
+
+        for _ in 0..field_count {
+            // Key is 2 bytes
+            if offset + 2 > bytes.len() {
+                return Err(crate::StateError::Serialization(
+                    "Extension data truncated at key".to_string(),
+                ));
+            }
+            let key = [bytes[offset], bytes[offset + 1]];
+            offset += 2;
+
+            // Value length is 2 bytes (u16)
+            if offset + 2 > bytes.len() {
+                return Err(crate::StateError::Serialization(
+                    "Extension data truncated at value length".to_string(),
+                ));
+            }
+            let value_len = u16::from_be_bytes([bytes[offset], bytes[offset + 1]]) as usize;
+            offset += 2;
+
+            // Value
+            if offset + value_len > bytes.len() {
+                return Err(crate::StateError::Serialization(
+                    "Extension data truncated at value".to_string(),
+                ));
+            }
+            let value = bytes[offset..offset + value_len].to_vec();
+            offset += value_len;
+
+            fields.push(ExtensionField { key, value });
+        }
+
+        Ok(Extension {
+            header_id: block_id,
+            fields,
+        })
+    }
+
+    /// Get extension by block ID.
+    pub fn get_extension(&self, block_id: &BlockId) -> StateResult<Option<Extension>> {
+        match self
+            .storage
+            .get(ColumnFamily::Extensions, block_id.0.as_ref())?
+        {
+            Some(bytes) => Ok(Some(Self::deserialize_extension(block_id.clone(), &bytes)?)),
+            None => Ok(None),
+        }
+    }
+
     /// Store AD proofs (batched version).
     pub fn put_ad_proofs_batched(&self, batch: &mut WriteBatch, proofs: &ADProofs) {
         batch.put(
@@ -1329,8 +1391,11 @@ impl History {
             None => return Ok(None),
         };
 
-        // Extension and AD proofs may or may not exist
-        let extension = Extension::empty(id.clone()); // TODO: Load from storage
+        // Load extension from storage, fall back to empty if not found
+        let extension = self
+            .blocks
+            .get_extension(id)?
+            .unwrap_or_else(|| Extension::empty(id.clone()));
         let ad_proofs = self.blocks.get_ad_proofs(id)?;
 
         Ok(Some(FullBlock::new(

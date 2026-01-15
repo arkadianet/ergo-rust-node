@@ -948,8 +948,9 @@ impl Node {
                                         headers.try_into().unwrap_or_else(|_| std::array::from_fn(|_| genesis_parent_header()))
                                     };
 
-                                    // Validate block
-                                    let validator = FullBlockValidator::new();
+                                    // Validate block using current chain parameters
+                                    let current_params = state_for_router.get_parameters();
+                                    let validator = FullBlockValidator::with_parameters(current_params);
                                     let utxo_state = &state_for_router.utxo;
                                     // Look up boxes - first check boxes created by previous blocks in this batch,
                                     // then fall back to the UTXO database
@@ -1056,6 +1057,8 @@ impl Node {
                                         match state_for_router.apply_blocks_batched(blocks) {
                                             Ok(_) => {
                                                 info!(first_h, last_h, batch_count, "Batch of blocks applied successfully");
+                                                // Update chain parameters if any epoch boundaries were crossed
+                                                state_for_router.update_parameters_for_height_range(first_h, last_h);
                                                 // Clear batch-created boxes since they're now in the database
                                                 batch_created_boxes.clear();
                                                 // Remove confirmed transactions from mempool
@@ -1117,6 +1120,8 @@ impl Node {
                                     match state_for_router.apply_blocks_batched(blocks) {
                                         Ok(_) => {
                                             info!(first_h, last_h, batch_count, "Final batch of blocks applied successfully");
+                                            // Update chain parameters if any epoch boundaries were crossed
+                                            state_for_router.update_parameters_for_height_range(first_h, last_h);
                                             // Remove confirmed transactions from mempool
                                             let removed = mempool.remove_confirmed(&confirmed_tx_ids, &spent_inputs);
                                             if removed > 0 {
@@ -1352,6 +1357,37 @@ impl Node {
                                             "Failed to add transaction to mempool"
                                         );
                                     }
+                                }
+                            }
+                            SyncCommand::StoreExtension { header_id, extension_data } => {
+                                use ergo_consensus::block::Extension;
+
+                                // Parse the extension
+                                let extension = match Extension::parse(&extension_data) {
+                                    Ok(ext) => ext,
+                                    Err(e) => {
+                                        warn!(
+                                            header_id = %hex::encode(&header_id),
+                                            error = %e,
+                                            "Failed to parse extension"
+                                        );
+                                        continue;
+                                    }
+                                };
+
+                                // Store the extension
+                                if let Err(e) = state_for_router.history.blocks.put_extension(&extension) {
+                                    warn!(
+                                        header_id = %hex::encode(&header_id),
+                                        error = %e,
+                                        "Failed to store extension"
+                                    );
+                                } else {
+                                    debug!(
+                                        header_id = %hex::encode(&header_id),
+                                        fields = extension.fields.len(),
+                                        "Extension stored"
+                                    );
                                 }
                             }
                         }

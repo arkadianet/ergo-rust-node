@@ -2,8 +2,9 @@
 
 use crate::{History, StateChange, StateError, StateResult, UtxoState};
 use ergo_chain_types::Header;
-use ergo_consensus::FullBlock;
+use ergo_consensus::{ChainParameters, FullBlock, VOTING_EPOCH_LENGTH};
 use ergo_storage::Storage;
+use parking_lot::RwLock;
 use std::sync::Arc;
 use tracing::{debug, info, instrument, warn};
 
@@ -33,6 +34,9 @@ pub struct StateManager {
     pub history: History,
     /// State root verification mode.
     state_root_verification: StateRootVerification,
+    /// Current chain parameters (updated at epoch boundaries from extensions).
+    /// Wrapped in RwLock for thread-safe updates while allowing shared access.
+    current_parameters: RwLock<ChainParameters>,
 }
 
 impl StateManager {
@@ -42,6 +46,7 @@ impl StateManager {
             utxo: UtxoState::new(Arc::clone(&storage)),
             history: History::new(storage),
             state_root_verification: StateRootVerification::default(),
+            current_parameters: RwLock::new(ChainParameters::default()),
         }
     }
 
@@ -54,6 +59,7 @@ impl StateManager {
             utxo: UtxoState::new(Arc::clone(&storage)),
             history: History::new(storage),
             state_root_verification: verification,
+            current_parameters: RwLock::new(ChainParameters::default()),
         }
     }
 
@@ -73,12 +79,81 @@ impl StateManager {
             utxo,
             history,
             state_root_verification: StateRootVerification::default(),
+            current_parameters: RwLock::new(ChainParameters::default()),
         };
 
         // Check UTXO state consistency and auto-recover if needed
         manager.check_and_recover_utxo_state()?;
 
+        // Initialize chain parameters from the most recent epoch boundary
+        manager.init_parameters_from_storage();
+
         Ok(manager)
+    }
+
+    /// Initialize chain parameters from storage by finding the most recent epoch boundary.
+    ///
+    /// This is called on startup to restore parameters to their correct values
+    /// based on what was voted in previous epochs.
+    fn init_parameters_from_storage(&self) {
+        let current_height = self.utxo.height();
+        if current_height == 0 {
+            return; // Fresh state, use defaults
+        }
+
+        // Find the most recent epoch boundary at or before current height
+        // Epoch boundaries are at heights divisible by 1024
+        let epoch_length = VOTING_EPOCH_LENGTH;
+        let most_recent_epoch = (current_height / epoch_length) * epoch_length;
+
+        if most_recent_epoch == 0 {
+            return; // Before first epoch, use defaults
+        }
+
+        info!(
+            current_height,
+            most_recent_epoch, "Initializing chain parameters from most recent epoch boundary"
+        );
+
+        // We need to scan backwards through epoch boundaries to build up the parameter state
+        // since parameters are inherited from previous epochs if not changed
+        let mut params = ChainParameters::default();
+        let mut epoch = epoch_length; // Start from first epoch boundary
+
+        while epoch <= most_recent_epoch {
+            if let Ok(Some(header)) = self.history.headers.get_by_height(epoch) {
+                if let Ok(Some(block)) = self.history.get_full_block(&header.id) {
+                    match block.extension.parse_parameters() {
+                        Ok(parsed) if !parsed.is_empty() => {
+                            params = ChainParameters::from_extension(epoch, &parsed, &params);
+                            debug!(
+                                epoch,
+                                max_block_cost = params.max_block_cost,
+                                "Loaded parameters from epoch boundary"
+                            );
+                        }
+                        Ok(_) => {
+                            // No parameters in this extension, keep previous values
+                        }
+                        Err(e) => {
+                            warn!(epoch, error = %e, "Failed to parse parameters from epoch");
+                        }
+                    }
+                }
+            }
+            epoch += epoch_length;
+        }
+
+        // Update current parameters
+        *self.current_parameters.write() = params.clone();
+
+        info!(
+            max_block_cost = params.max_block_cost,
+            storage_fee_factor = params.storage_fee_factor,
+            input_cost = params.input_cost,
+            output_cost = params.output_cost,
+            "Chain parameters initialized from storage"
+        );
     }
 
     /// Check UTXO state consistency and rollback if corrupted.
@@ -538,6 +613,88 @@ impl StateManager {
     /// Get a full block by ID.
     pub fn get_full_block(&self, id: &ergo_chain_types::BlockId) -> StateResult<Option<FullBlock>> {
         self.history.get_full_block(id)
+    }
+
+    /// Update chain parameters from a block's extension if at an epoch boundary.
+    ///
+    /// Parameters are stored in block extensions and updated via miner voting
+    /// at epoch boundaries (every 1024 blocks). This method should be called
+    /// after each block is applied to check for parameter updates.
+    ///
+    /// This method is safe to call from multiple threads due to interior mutability.
+    pub fn update_parameters_from_block(&self, block: &FullBlock) {
+        let height = block.height();
+
+        // Only check for parameter updates at epoch boundaries
+        if !ChainParameters::is_epoch_boundary(height) {
+            return;
+        }
+
+        // Parse parameters from extension
+        match block.extension.parse_parameters() {
+            Ok(parsed) if !parsed.is_empty() => {
+                let mut params = self.current_parameters.write();
+                let old_max_block_cost = params.max_block_cost;
+                *params = ChainParameters::from_extension(height, &parsed, &params);
+
+                info!(
+                    height,
+                    max_block_cost = params.max_block_cost,
+                    storage_fee_factor = params.storage_fee_factor,
+                    input_cost = params.input_cost,
+                    output_cost = params.output_cost,
+                    "Updated chain parameters at epoch boundary"
+                );
+
+                // Log if max_block_cost changed (important for transaction validation)
+                if params.max_block_cost != old_max_block_cost {
+                    info!(
+                        height,
+                        old_max_block_cost,
+                        new_max_block_cost = params.max_block_cost,
+                        "max_block_cost parameter changed via voting"
+                    );
+                }
+            }
+            Ok(_) => {
+                // Empty extension or no system parameters - keep existing values
+                debug!(
+                    height,
+                    "Epoch boundary reached but no parameters in extension"
+                );
+            }
+            Err(e) => {
+                warn!(
+                    height,
+                    error = %e,
+                    "Failed to parse extension parameters at epoch boundary"
+                );
+            }
+        }
+    }
+
+    /// Get the current chain parameters.
+    /// Returns a clone of the parameters to allow safe concurrent access.
+    pub fn get_parameters(&self) -> ChainParameters {
+        self.current_parameters.read().clone()
+    }
+
+    /// Update chain parameters if any blocks in the given height range crossed an epoch boundary.
+    ///
+    /// This should be called after applying a batch of blocks. It checks for epoch boundaries
+    /// and fetches extensions from storage to update parameters as needed.
+    pub fn update_parameters_for_height_range(&self, first_height: u32, last_height: u32) {
+        // Find all epoch boundaries in this range
+        for height in first_height..=last_height {
+            if ChainParameters::is_epoch_boundary(height) {
+                // Try to get the block at this height and update parameters from its extension
+                if let Ok(Some(header)) = self.history.headers.get_by_height(height) {
+                    if let Ok(Some(block)) = self.history.get_full_block(&header.id) {
+                        self.update_parameters_from_block(&block);
+                    }
+                }
+            }
+        }
     }
 }
 

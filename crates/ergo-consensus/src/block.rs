@@ -16,6 +16,35 @@ pub use ergo_lib::ergotree_ir::chain::token::{Token, TokenAmount, TokenId};
 
 use ergo_chain_types::AutolykosSolution;
 
+/// VLQ decode an unsigned integer from a byte slice.
+/// Returns (value, bytes_consumed) on success.
+fn vlq_decode(data: &[u8]) -> Result<(u64, usize), &'static str> {
+    let mut result: u64 = 0;
+    let mut shift = 0;
+    let mut pos = 0;
+
+    loop {
+        if pos >= data.len() {
+            return Err("Truncated VLQ");
+        }
+        let byte = data[pos];
+        pos += 1;
+
+        result |= ((byte & 0x7F) as u64) << shift;
+
+        if (byte & 0x80) == 0 {
+            break;
+        }
+        shift += 7;
+
+        if shift > 63 {
+            return Err("VLQ overflow");
+        }
+    }
+
+    Ok((result, pos))
+}
+
 /// Create a minimal "genesis parent" header for use when validating the genesis block (height 1).
 /// This header has height 0 and all-zero IDs, serving as the virtual parent of the genesis block.
 pub fn genesis_parent_header() -> Header {
@@ -416,6 +445,71 @@ impl Extension {
         }
     }
 
+    /// Parse extension from network bytes.
+    ///
+    /// Format (matches Scala ExtensionSerializer):
+    /// - 32 bytes: header ID
+    /// - VLQ: number of fields (putUShort in Scala uses VLQ encoding)
+    /// - For each field:
+    ///   - 2 bytes: key
+    ///   - 1 byte (UByte): value length
+    ///   - N bytes: value
+    pub fn parse(data: &[u8]) -> Result<Self, crate::ConsensusError> {
+        // Minimum: 32 bytes header ID + at least 1 byte for VLQ count
+        if data.len() < 33 {
+            return Err(crate::ConsensusError::InvalidExtension(
+                "Extension data too short".to_string(),
+            ));
+        }
+
+        // Parse header ID (32 bytes)
+        let mut header_id_bytes = [0u8; 32];
+        header_id_bytes.copy_from_slice(&data[0..32]);
+        let header_id = BlockId(Digest32::from(header_id_bytes));
+
+        // Parse field count using VLQ (Scala's putUShort uses VLQ encoding)
+        let (field_count, bytes_read) = vlq_decode(&data[32..]).map_err(|e| {
+            crate::ConsensusError::InvalidExtension(format!("Failed to decode field count: {}", e))
+        })?;
+        let field_count = field_count as usize;
+
+        let mut offset = 32 + bytes_read;
+        let mut fields = Vec::with_capacity(field_count);
+
+        for _ in 0..field_count {
+            // Key (2 bytes)
+            if offset + 2 > data.len() {
+                return Err(crate::ConsensusError::InvalidExtension(
+                    "Extension data truncated at key".to_string(),
+                ));
+            }
+            let key = [data[offset], data[offset + 1]];
+            offset += 2;
+
+            // Value length (1 byte)
+            if offset >= data.len() {
+                return Err(crate::ConsensusError::InvalidExtension(
+                    "Extension data truncated at value length".to_string(),
+                ));
+            }
+            let value_len = data[offset] as usize;
+            offset += 1;
+
+            // Value
+            if offset + value_len > data.len() {
+                return Err(crate::ConsensusError::InvalidExtension(
+                    "Extension data truncated at value".to_string(),
+                ));
+            }
+            let value = data[offset..offset + value_len].to_vec();
+            offset += value_len;
+
+            fields.push(ExtensionField { key, value });
+        }
+
+        Ok(Self { header_id, fields })
+    }
+
     /// Get a field by key.
     pub fn get(&self, key: &[u8; 2]) -> Option<&[u8]> {
         self.fields
@@ -426,16 +520,70 @@ impl Extension {
 
     /// Get interlinks (for NiPoPoW).
     pub fn interlinks(&self) -> Option<Vec<BlockId>> {
-        // Interlinks are stored with key prefix 0x00
+        // Interlinks are stored with key prefix 0x01
         // This is a simplified implementation
         None // TODO: Implement interlinks parsing
     }
 
-    /// Get system parameters from extension.
+    /// System parameters prefix in extension keys.
+    /// Parameters are stored with key format: [0x00, param_id]
+    pub const SYSTEM_PARAMS_PREFIX: u8 = 0x00;
+
+    /// Parse system parameters from extension fields.
+    ///
+    /// Parameters in Ergo extensions are stored as:
+    /// - Key: 2 bytes - [SYSTEM_PARAMS_PREFIX (0x00), param_id]
+    /// - Value: 4 bytes - big-endian signed 32-bit integer
+    ///
+    /// Returns a map of parameter_id -> value, or an error if parsing fails.
+    pub fn parse_parameters(
+        &self,
+    ) -> Result<std::collections::HashMap<u8, i32>, crate::ConsensusError> {
+        use std::collections::HashMap;
+
+        let mut params = HashMap::new();
+
+        for field in &self.fields {
+            // Check for system parameter prefix
+            if field.key[0] == Self::SYSTEM_PARAMS_PREFIX {
+                let param_id = field.key[1];
+
+                // Skip special keys (soft-fork related, etc.)
+                // Param IDs 1-8 are the core votable parameters
+                // IDs >= 120 are soft-fork voting related
+                if param_id >= 120 {
+                    continue;
+                }
+
+                // Values must be exactly 4 bytes (big-endian i32)
+                if field.value.len() != 4 {
+                    return Err(crate::ConsensusError::InvalidExtension(format!(
+                        "Parameter {} has invalid value length: {} (expected 4)",
+                        param_id,
+                        field.value.len()
+                    )));
+                }
+
+                let value = i32::from_be_bytes([
+                    field.value[0],
+                    field.value[1],
+                    field.value[2],
+                    field.value[3],
+                ]);
+
+                params.insert(param_id, value);
+            }
+        }
+
+        Ok(params)
+    }
+
+    /// Get system parameters from extension (legacy method, returns empty for compatibility).
+    #[deprecated(note = "Use parse_parameters() instead")]
     pub fn parameters(&self) -> Vec<(u8, u64)> {
-        // Parameters are stored with specific key prefixes
-        // This is a simplified implementation
-        Vec::new() // TODO: Implement parameter parsing
+        self.parse_parameters()
+            .map(|params| params.into_iter().map(|(k, v)| (k, v as u64)).collect())
+            .unwrap_or_default()
     }
 }
 
