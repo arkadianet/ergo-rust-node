@@ -952,14 +952,54 @@ impl Node {
                                     let current_params = state_for_router.get_parameters();
                                     let validator = FullBlockValidator::with_parameters(current_params);
                                     let utxo_state = &state_for_router.utxo;
+
+                                    // Pre-fetch all input boxes for this block in a single batch read.
+                                    // This is much faster than individual lookups during validation.
+                                    let prefetched_boxes: std::collections::HashMap<Vec<u8>, ErgoBox> = {
+                                        // Collect all input box IDs that aren't in batch_created_boxes
+                                        let input_ids: Vec<Vec<u8>> = full_block.transactions.txs.iter()
+                                            .flat_map(|tx| tx.inputs.iter())
+                                            .map(|input| input.box_id.as_ref().to_vec())
+                                            .filter(|id| !batch_created_boxes.contains_key(id))
+                                            .collect();
+
+                                        // Also collect data input IDs
+                                        let data_input_ids: Vec<Vec<u8>> = full_block.transactions.txs.iter()
+                                            .filter_map(|tx| tx.data_inputs.as_ref())
+                                            .flat_map(|di| di.iter())
+                                            .map(|input| input.box_id.as_ref().to_vec())
+                                            .filter(|id| !batch_created_boxes.contains_key(id))
+                                            .collect();
+
+                                        // Combine and deduplicate
+                                        let mut all_ids: Vec<Vec<u8>> = input_ids;
+                                        all_ids.extend(data_input_ids);
+                                        all_ids.sort();
+                                        all_ids.dedup();
+
+                                        // Batch fetch from UTXO database
+                                        let id_refs: Vec<&[u8]> = all_ids.iter().map(|v| v.as_slice()).collect();
+                                        let fetched = utxo_state.get_boxes_batch(&id_refs).unwrap_or_default();
+
+                                        // Build lookup map
+                                        all_ids.into_iter()
+                                            .zip(fetched.into_iter())
+                                            .filter_map(|(id, opt)| opt.map(|entry| (id, entry.ergo_box)))
+                                            .collect()
+                                    };
+
                                     // Look up boxes - first check boxes created by previous blocks in this batch,
-                                    // then fall back to the UTXO database
+                                    // then check pre-fetched boxes, then fall back to UTXO database (shouldn't happen)
                                     let utxo_lookup = |box_id: &[u8]| -> Option<ErgoBox> {
                                         // First check boxes created by previous blocks in this batch
                                         if let Some(ergo_box) = batch_created_boxes.get(box_id) {
                                             return Some(ergo_box.clone());
                                         }
-                                        // Fall back to UTXO database
+                                        // Check pre-fetched boxes
+                                        if let Some(ergo_box) = prefetched_boxes.get(box_id) {
+                                            return Some(ergo_box.clone());
+                                        }
+                                        // Fall back to UTXO database (shouldn't happen if pre-fetch worked)
                                         utxo_state.get_box_by_bytes(box_id).ok().flatten().map(|entry| entry.ergo_box)
                                     };
 

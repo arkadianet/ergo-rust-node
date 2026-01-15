@@ -491,6 +491,21 @@ impl UtxoState {
         }
     }
 
+    /// Get multiple boxes by their ID bytes in a single batch read.
+    /// This is significantly faster than individual lookups for validating blocks.
+    pub fn get_boxes_batch(&self, box_ids: &[&[u8]]) -> StateResult<Vec<Option<BoxEntry>>> {
+        if box_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let results = self.storage.multi_get(columns::UTXO, box_ids)?;
+
+        results
+            .into_iter()
+            .map(|opt| opt.map(|bytes| BoxEntry::deserialize(&bytes)).transpose())
+            .collect()
+    }
+
     /// Check if a box exists.
     pub fn contains_box(&self, box_id: &BoxId) -> StateResult<bool> {
         self.storage

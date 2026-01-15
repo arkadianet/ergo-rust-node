@@ -123,8 +123,11 @@ impl ColumnFamily {
     }
 }
 
-/// Default block cache size: 256MB shared across all column families.
-const DEFAULT_BLOCK_CACHE_SIZE: usize = 256 * 1024 * 1024;
+///// Default block cache size: 512MB shared across all column families.
+/// Increased from 256MB to better support 512 parallel block downloads.
+/// Each block validation needs to read input boxes, and with high parallelism
+/// a larger cache prevents thrashing.
+const DEFAULT_BLOCK_CACHE_SIZE: usize = 512 * 1024 * 1024;
 
 /// Block cache size for read-only mode: 16MB.
 const READONLY_BLOCK_CACHE_SIZE: usize = 16 * 1024 * 1024;
@@ -163,6 +166,9 @@ impl Database {
         opts.set_level_zero_file_num_compaction_trigger(8); // Delay L0 compaction
         opts.set_max_background_jobs(4); // Background compaction threads
 
+        // Optimize for point lookups (UTXO by box_id)
+        opts.optimize_for_point_lookup(512); // 512MB block cache hint
+
         // Reduce write amplification by increasing level size multiplier
         // Default is 10x between levels; 20x means fewer levels and less frequent compaction
         opts.set_max_bytes_for_level_multiplier(20.0);
@@ -194,6 +200,11 @@ impl Database {
                 // Keep index and filter blocks in cache for better read performance
                 block_opts.set_cache_index_and_filter_blocks(true);
                 block_opts.set_pin_l0_filter_and_index_blocks_in_cache(true);
+                // Use bloom filter to reduce disk reads for non-existent keys
+                // 10 bits per key gives ~1% false positive rate
+                block_opts.set_bloom_filter(10.0, false);
+                // Use larger blocks for better compression and fewer index entries
+                block_opts.set_block_size(16 * 1024); // 16KB blocks (default is 4KB)
                 cf_opts.set_block_based_table_factory(&block_opts);
 
                 ColumnFamilyDescriptor::new(cf.name(), cf_opts)
@@ -432,6 +443,29 @@ impl Storage for Database {
             .collect();
 
         Ok(Box::new(collected.into_iter()))
+    }
+
+    /// Get multiple values using RocksDB's native multi_get_cf.
+    /// This is significantly faster than individual gets for batch lookups.
+    fn multi_get(&self, cf: ColumnFamily, keys: &[&[u8]]) -> StorageResult<Vec<Option<Vec<u8>>>> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let db = self.db.read();
+        let handle = db
+            .cf_handle(cf.name())
+            .ok_or_else(|| StorageError::ColumnFamilyNotFound(cf.name().to_string()))?;
+
+        // Use RocksDB's native multi_get_cf for batched reads
+        let cf_keys: Vec<_> = keys.iter().map(|k| (&handle, *k)).collect();
+        let results = db.multi_get_cf(cf_keys);
+
+        // Convert results
+        results
+            .into_iter()
+            .map(|r| r.map_err(StorageError::from))
+            .collect()
     }
 }
 
