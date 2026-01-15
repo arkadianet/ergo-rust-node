@@ -807,6 +807,21 @@ impl SyncProtocol {
         info!(peer = %peer, "Peer disconnected");
         self.sync_peers.write().remove(peer);
         self.synchronizer.remove_peer(peer);
+
+        // Fail all in-flight downloads assigned to this peer so they can be retried
+        // with other peers. This prevents downloads from getting stuck when a peer
+        // disconnects without delivering the requested blocks.
+        let in_flight_for_peer = self.downloader.get_in_flight_for_peer(peer);
+        if !in_flight_for_peer.is_empty() {
+            info!(
+                peer = %peer,
+                count = in_flight_for_peer.len(),
+                "Failing in-flight downloads for disconnected peer"
+            );
+            for id in in_flight_for_peer {
+                self.downloader.fail(&id, peer);
+            }
+        }
     }
 
     /// Handle received SyncInfo.
@@ -1938,9 +1953,30 @@ impl SyncProtocol {
 
         // Check for block download timeouts
         let timed_out = self.downloader.check_timeouts();
-        for (id, peer) in timed_out {
-            warn!(id = hex::encode(&id), peer = %peer, "Block download timed out");
-            self.downloader.fail(&id, &peer);
+
+        // Track timeouts per peer to detect unresponsive peers
+        let mut timeouts_per_peer: std::collections::HashMap<PeerId, u32> =
+            std::collections::HashMap::new();
+
+        for (id, peer) in &timed_out {
+            warn!(id = hex::encode(id), peer = %peer, "Block download timed out");
+            self.downloader.fail(id, peer);
+            *timeouts_per_peer.entry(peer.clone()).or_insert(0) += 1;
+        }
+
+        // If a peer has too many timeouts in one tick, it's likely unresponsive.
+        // Remove it from sync peers so we stop sending requests to it.
+        const MAX_TIMEOUTS_PER_TICK: u32 = 10;
+        for (peer, count) in timeouts_per_peer {
+            if count >= MAX_TIMEOUTS_PER_TICK {
+                warn!(
+                    peer = %peer,
+                    timeout_count = count,
+                    "Removing unresponsive peer due to excessive timeouts"
+                );
+                self.sync_peers.write().remove(&peer);
+                self.synchronizer.remove_peer(&peer);
+            }
         }
 
         // Check for header request timeouts and re-queue them
