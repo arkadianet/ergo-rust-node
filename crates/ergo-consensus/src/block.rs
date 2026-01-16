@@ -3,6 +3,7 @@
 //! This module re-exports and extends block types from sigma-rust
 //! for use in the node implementation.
 
+use crate::extension::Extension;
 use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
 use serde::{Deserialize, Serialize};
 
@@ -384,60 +385,7 @@ pub enum BlockTransactionsParseError {
     TransactionParse(String),
 }
 
-/// Block extension containing key-value pairs.
-#[derive(Debug, Clone)]
-pub struct Extension {
-    /// Header ID this extension belongs to.
-    pub header_id: BlockId,
-    /// Key-value fields (key is 2 bytes, value is up to 64 bytes).
-    pub fields: Vec<ExtensionField>,
-}
-
-/// A single extension field.
-#[derive(Debug, Clone)]
-pub struct ExtensionField {
-    /// Field key (2 bytes).
-    pub key: [u8; 2],
-    /// Field value (up to 64 bytes).
-    pub value: Vec<u8>,
-}
-
-impl Extension {
-    /// Create a new extension.
-    pub fn new(header_id: BlockId, fields: Vec<ExtensionField>) -> Self {
-        Self { header_id, fields }
-    }
-
-    /// Create an empty extension.
-    pub fn empty(header_id: BlockId) -> Self {
-        Self {
-            header_id,
-            fields: Vec::new(),
-        }
-    }
-
-    /// Get a field by key.
-    pub fn get(&self, key: &[u8; 2]) -> Option<&[u8]> {
-        self.fields
-            .iter()
-            .find(|f| &f.key == key)
-            .map(|f| f.value.as_slice())
-    }
-
-    /// Get interlinks (for NiPoPoW).
-    pub fn interlinks(&self) -> Option<Vec<BlockId>> {
-        // Interlinks are stored with key prefix 0x00
-        // This is a simplified implementation
-        None // TODO: Implement interlinks parsing
-    }
-
-    /// Get system parameters from extension.
-    pub fn parameters(&self) -> Vec<(u8, u64)> {
-        // Parameters are stored with specific key prefixes
-        // This is a simplified implementation
-        Vec::new() // TODO: Implement parameter parsing
-    }
-}
+// Extension and ExtensionField are defined in crate::extension
 
 /// Authenticated data structure proofs.
 #[derive(Debug, Clone)]

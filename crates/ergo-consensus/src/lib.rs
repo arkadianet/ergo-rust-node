@@ -24,9 +24,12 @@
 mod autolykos;
 pub mod block;
 pub mod block_validation;
+mod chain_params;
 pub mod cost;
 mod difficulty;
+mod eip37_difficulty;
 mod error;
+mod extension;
 pub mod nipopow;
 pub mod reemission;
 pub mod tx_validation;
@@ -40,8 +43,7 @@ pub use autolykos::{
     AutolykosV2,
 };
 pub use block::{
-    ADProofs, BlockInfo, BlockStatus, BlockTransactions, Extension, ExtensionField, FullBlock,
-    ModifierId, ModifierType,
+    ADProofs, BlockInfo, BlockStatus, BlockTransactions, FullBlock, ModifierId, ModifierType,
 };
 pub use block_validation::{
     BlockValidationResult, CreatedBox, FullBlockValidator, SpentBox, ValidatedStateChange,
@@ -53,6 +55,12 @@ pub use cost::{
 pub use difficulty::{calculate_required_difficulty, DifficultyAdjustment, HeaderForDifficulty};
 pub use error::{ConsensusError, ConsensusResult};
 pub use params::AUTOLYKOS_V2_ACTIVATION_HEIGHT;
+pub use chain_params::{ChainParams, ChainParamsConfig, ChainParamsError};
+pub use eip37_difficulty::{Eip37DifficultyCalculator, EpochHeader};
+pub use extension::{
+    verify_extension_root, Extension, ExtensionField, ExtensionParseError, EMPTY_MERKLE_ROOT,
+    FIELD_KEY_SIZE, FIELD_VALUE_MAX_SIZE, MAX_EXTENSION_SIZE,
+};
 pub use validation::{BlockValidator, HeaderValidator, TransactionValidator};
 
 /// Ergo network parameters.
