@@ -273,7 +273,11 @@ impl Extension {
     /// Total serialized size.
     pub fn serialized_size(&self) -> usize {
         32 + vlq_size(self.fields.len() as u64)
-            + self.fields.iter().map(|f| f.serialized_size()).sum::<usize>()
+            + self
+                .fields
+                .iter()
+                .map(|f| f.serialized_size())
+                .sum::<usize>()
     }
 
     /// Parse extension from bytes (Scala-compatible format).
@@ -696,7 +700,10 @@ mod tests {
         // Use is_genesis=true to bypass interlinks check and test header_id comparison
         let result = verify_extension_root(&ext, &wrong_header_id, &root, true);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("header_id mismatch"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("header_id mismatch"));
     }
 
     #[test]
@@ -711,7 +718,10 @@ mod tests {
         // Non-genesis should fail with interlinks error
         let result = verify_extension_root(&ext, &header_id, &correct_root, false);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("interlinks validation"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("interlinks validation"));
     }
 
     #[test]
@@ -731,7 +741,10 @@ mod tests {
         assert!(serialized.len() >= MAX_EXTENSION_SIZE);
 
         let result = Extension::parse(&serialized);
-        assert!(matches!(result, Err(ExtensionParseError::SizeLimitExceeded)));
+        assert!(matches!(
+            result,
+            Err(ExtensionParseError::SizeLimitExceeded)
+        ));
     }
 
     // ========================================================================
@@ -745,13 +758,16 @@ mod tests {
 
     /// Helper to create Extension and check digest against expected hash.
     /// Note: This validates Merkle tree computation, not binary parse/serialize compatibility.
-    fn check_extension_digest(header_id_hex: &str, expected_hash_hex: &str, fields: Vec<(&str, &str)>) {
+    fn check_extension_digest(
+        header_id_hex: &str,
+        expected_hash_hex: &str,
+        fields: Vec<(&str, &str)>,
+    ) {
         let header_id = BlockId(Digest32::from(
             <[u8; 32]>::try_from(hex::decode(header_id_hex).unwrap()).unwrap(),
         ));
-        let expected_root = Digest32::from(
-            <[u8; 32]>::try_from(hex::decode(expected_hash_hex).unwrap()).unwrap(),
-        );
+        let expected_root =
+            Digest32::from(<[u8; 32]>::try_from(hex::decode(expected_hash_hex).unwrap()).unwrap());
 
         let ext_fields: Vec<ExtensionField> = fields
             .into_iter()
@@ -776,8 +792,10 @@ mod tests {
     fn test_golden_mainnet_height_1() {
         let header_id = BlockId(Digest32::from(
             <[u8; 32]>::try_from(
-                hex::decode("b0244dfc267baca974a4caee06120321562784303a8a688976ae56170e4d175b").unwrap(),
-            ).unwrap(),
+                hex::decode("b0244dfc267baca974a4caee06120321562784303a8a688976ae56170e4d175b")
+                    .unwrap(),
+            )
+            .unwrap(),
         ));
 
         let ext = Extension::empty(header_id);
@@ -797,10 +815,22 @@ mod tests {
             "6ba802b17c9598a15c8da1736e975e34143e93d799f5d2a9bc408bd2b3f19a1f",
             "e50f879c7bfb17d9049b61f784473b44b39c1c2dbc97a1b5ebe9956275050582",
             vec![
-                ("0100", "01b0244dfc267baca974a4caee06120321562784303a8a688976ae56170e4d175b"),
-                ("0101", "01855fc5c9eed868b43ea2c3df99ec17dd9d903187d891e2365a89b98125c994b2"),
-                ("0102", "0135bda2041b8ec2b429b8d1f86e5ec9ebdd03aa982635effd1693637a89d6fd8b"),
-                ("0103", "0399cca27ca09df4d90ca22b14277b94983d0f7da221e2cef55a6ad19e70c185f0"),
+                (
+                    "0100",
+                    "01b0244dfc267baca974a4caee06120321562784303a8a688976ae56170e4d175b",
+                ),
+                (
+                    "0101",
+                    "01855fc5c9eed868b43ea2c3df99ec17dd9d903187d891e2365a89b98125c994b2",
+                ),
+                (
+                    "0102",
+                    "0135bda2041b8ec2b429b8d1f86e5ec9ebdd03aa982635effd1693637a89d6fd8b",
+                ),
+                (
+                    "0103",
+                    "0399cca27ca09df4d90ca22b14277b94983d0f7da221e2cef55a6ad19e70c185f0",
+                ),
             ],
         );
     }
@@ -812,11 +842,26 @@ mod tests {
             "80e4ce0c3337b62e7e1d98e0ee0131bbfb1b6472b543b1604caf9af331aa4e8d",
             "face3cc2af16d2353a943fea15a2560f7c9fc712b1ffcaac66bceb9796badd84",
             vec![
-                ("0100", "01b0244dfc267baca974a4caee06120321562784303a8a688976ae56170e4d175b"),
-                ("0101", "028915208f1ea6fc521dc6c41160b73feba6b3e4e05850efe122032b0e3e220bd4"),
-                ("0103", "01db39f7e5927319f0c7e3fc82de2fd0d6254204d355aab2d0142ad28a5f6b4a49"),
-                ("0104", "01afbe8123831290472a3c9e298ac1c5ae991d52edb13ca07921a3d72749213b6e"),
-                ("0105", "064077fcf3359c15c3ad3797a78fff342166f09a7f1b22891a18030dcd8604b087"),
+                (
+                    "0100",
+                    "01b0244dfc267baca974a4caee06120321562784303a8a688976ae56170e4d175b",
+                ),
+                (
+                    "0101",
+                    "028915208f1ea6fc521dc6c41160b73feba6b3e4e05850efe122032b0e3e220bd4",
+                ),
+                (
+                    "0103",
+                    "01db39f7e5927319f0c7e3fc82de2fd0d6254204d355aab2d0142ad28a5f6b4a49",
+                ),
+                (
+                    "0104",
+                    "01afbe8123831290472a3c9e298ac1c5ae991d52edb13ca07921a3d72749213b6e",
+                ),
+                (
+                    "0105",
+                    "064077fcf3359c15c3ad3797a78fff342166f09a7f1b22891a18030dcd8604b087",
+                ),
             ],
         );
     }
@@ -828,16 +873,46 @@ mod tests {
             "d89ccbe0a67a779953eb9d4e55f2734d1953d870ed0ce923ea6cd9f27fb2cf05",
             "fc4db80fe3385601d1930e97af43778b1bc801d5279e7f31f6258a47b8816abb",
             vec![
-                ("0100", "01b0244dfc267baca974a4caee06120321562784303a8a688976ae56170e4d175b"),
-                ("0101", "01ac8640777e90a8d7730582ee45f843826d17a50d1c50def8a859c0c8b2c30261"),
-                ("0102", "01aa31186639077b22185125cf2af382e4f45cf0ff8567728a9754361ae065da8c"),
-                ("0103", "02b352668721c07cef942e7cce58982fd154c313f8a0e8a0a873e7c3d4640bc5ff"),
-                ("0105", "0260ca4c8c381dd75c877dc19e4bba94faa538379473d555eaeef4979509860baf"),
-                ("0107", "0134f94672ae102071ca1b0a5a280b12716b940a147267ee68844ef2d47e4aed1e"),
-                ("0108", "03c29bf56a0073108fb567d34993444b6eaf4c97b2d205f501107690ae4b31adc8"),
-                ("010b", "01762ed118ba19ed1a0e7947982caf19db039dac4e88375ba13b908efe8d68ec68"),
-                ("010c", "017c81e55fd842c65304dd98e37f1bc29456e5f889829d985d4a89bd51b549fd3a"),
-                ("010d", "01d95cd7bdd56bf1e9008ffa2e991cd03c615af27968e871195e6d5978262c4a41"),
+                (
+                    "0100",
+                    "01b0244dfc267baca974a4caee06120321562784303a8a688976ae56170e4d175b",
+                ),
+                (
+                    "0101",
+                    "01ac8640777e90a8d7730582ee45f843826d17a50d1c50def8a859c0c8b2c30261",
+                ),
+                (
+                    "0102",
+                    "01aa31186639077b22185125cf2af382e4f45cf0ff8567728a9754361ae065da8c",
+                ),
+                (
+                    "0103",
+                    "02b352668721c07cef942e7cce58982fd154c313f8a0e8a0a873e7c3d4640bc5ff",
+                ),
+                (
+                    "0105",
+                    "0260ca4c8c381dd75c877dc19e4bba94faa538379473d555eaeef4979509860baf",
+                ),
+                (
+                    "0107",
+                    "0134f94672ae102071ca1b0a5a280b12716b940a147267ee68844ef2d47e4aed1e",
+                ),
+                (
+                    "0108",
+                    "03c29bf56a0073108fb567d34993444b6eaf4c97b2d205f501107690ae4b31adc8",
+                ),
+                (
+                    "010b",
+                    "01762ed118ba19ed1a0e7947982caf19db039dac4e88375ba13b908efe8d68ec68",
+                ),
+                (
+                    "010c",
+                    "017c81e55fd842c65304dd98e37f1bc29456e5f889829d985d4a89bd51b549fd3a",
+                ),
+                (
+                    "010d",
+                    "01d95cd7bdd56bf1e9008ffa2e991cd03c615af27968e871195e6d5978262c4a41",
+                ),
             ],
         );
     }
@@ -849,13 +924,34 @@ mod tests {
             "9b61e8564436969ff3beeb7afbfcfea9794116cffc28f0cfd04dbaccae2df0d7",
             "700fe9fc286d070e3023a7436dc77e9562d88fe95eb5a9854530968d75a43ced",
             vec![
-                ("0100", "01b0244dfc267baca974a4caee06120321562784303a8a688976ae56170e4d175b"),
-                ("0101", "05557fd0590616b4f6e51eaf54436d61e5585eebfc5a9e860861fc0876064bd3d9"),
-                ("0106", "08bfbba05dcf8c38a63e5a6ccc0783f23919d6aa9a987c39f9c8be9f5bb6eeb86b"),
-                ("010e", "01358ffda65c6b8a3adc2dff66e0e31039e4440f340f05f16f9d07c92b94e33ed4"),
-                ("010f", "02adc5f636843a6bd529d20e4668067465b8a66a2c14fa218e9c03b4ea2444c297"),
-                ("0111", "02d25eec3d4548ca4fdcdffc0ef23677d2d8d3fd4f0bf89570884cf02002d16301"),
-                ("0113", "0132f4a68f2eb9a4ff2b2c2626c1b4bd40670c607ef6be8cf4c26a85614e25184b"),
+                (
+                    "0100",
+                    "01b0244dfc267baca974a4caee06120321562784303a8a688976ae56170e4d175b",
+                ),
+                (
+                    "0101",
+                    "05557fd0590616b4f6e51eaf54436d61e5585eebfc5a9e860861fc0876064bd3d9",
+                ),
+                (
+                    "0106",
+                    "08bfbba05dcf8c38a63e5a6ccc0783f23919d6aa9a987c39f9c8be9f5bb6eeb86b",
+                ),
+                (
+                    "010e",
+                    "01358ffda65c6b8a3adc2dff66e0e31039e4440f340f05f16f9d07c92b94e33ed4",
+                ),
+                (
+                    "010f",
+                    "02adc5f636843a6bd529d20e4668067465b8a66a2c14fa218e9c03b4ea2444c297",
+                ),
+                (
+                    "0111",
+                    "02d25eec3d4548ca4fdcdffc0ef23677d2d8d3fd4f0bf89570884cf02002d16301",
+                ),
+                (
+                    "0113",
+                    "0132f4a68f2eb9a4ff2b2c2626c1b4bd40670c607ef6be8cf4c26a85614e25184b",
+                ),
             ],
         );
     }
@@ -867,15 +963,42 @@ mod tests {
             "0261b8bbe791aa26379c679e22359d21a92bda09abd369b938946d0128eed660",
             "e707ca7f23c5aae204a6efee62a80da649f5bb65ebfdc4bbd8c448108286a595",
             vec![
-                ("0100", "01b0244dfc267baca974a4caee06120321562784303a8a688976ae56170e4d175b"),
-                ("0101", "01557fd0590616b4f6e51eaf54436d61e5585eebfc5a9e860861fc0876064bd3d9"),
-                ("0102", "04296e2707cf72b6a2c71e4966028d8786c7f5425850e9609757ce8b3713f548fe"),
-                ("0106", "01bca7a5ea56428e96962c8ec4149ff3f84486b7fde8f5f910644f35f12336d968"),
-                ("0107", "0144a3a530e8d34c88b53e82717c6f8f59b3c235718959f47c4cd520722281918c"),
-                ("0108", "04bdc4cf819e5a39a09f92c33d3aafde9d14594368e17bbb1499ebce9ec1f26434"),
-                ("010c", "04dd1e32fbae42094450b1be567bac803111d47f4a1fcf695569615b8a73c00560"),
-                ("0110", "02229a0653a86e9397c2cd7a5d87e742710eb3fcbe10e32b2ec56145b0514fa919"),
-                ("0112", "028345f2a105762203d6f8fc547861dc9aefd6477b333f7baa1aace61ddc3ceafb"),
+                (
+                    "0100",
+                    "01b0244dfc267baca974a4caee06120321562784303a8a688976ae56170e4d175b",
+                ),
+                (
+                    "0101",
+                    "01557fd0590616b4f6e51eaf54436d61e5585eebfc5a9e860861fc0876064bd3d9",
+                ),
+                (
+                    "0102",
+                    "04296e2707cf72b6a2c71e4966028d8786c7f5425850e9609757ce8b3713f548fe",
+                ),
+                (
+                    "0106",
+                    "01bca7a5ea56428e96962c8ec4149ff3f84486b7fde8f5f910644f35f12336d968",
+                ),
+                (
+                    "0107",
+                    "0144a3a530e8d34c88b53e82717c6f8f59b3c235718959f47c4cd520722281918c",
+                ),
+                (
+                    "0108",
+                    "04bdc4cf819e5a39a09f92c33d3aafde9d14594368e17bbb1499ebce9ec1f26434",
+                ),
+                (
+                    "010c",
+                    "04dd1e32fbae42094450b1be567bac803111d47f4a1fcf695569615b8a73c00560",
+                ),
+                (
+                    "0110",
+                    "02229a0653a86e9397c2cd7a5d87e742710eb3fcbe10e32b2ec56145b0514fa919",
+                ),
+                (
+                    "0112",
+                    "028345f2a105762203d6f8fc547861dc9aefd6477b333f7baa1aace61ddc3ceafb",
+                ),
             ],
         );
     }
@@ -887,18 +1010,54 @@ mod tests {
             "f04085962f306d8e4ee9f1a415abb82c32ac6a183d4d286e995569c978a7c5cb",
             "367ea050a780669223476b7c43a1a5d07b8b0e7dfb508ac10ac93814d4bcd78f",
             vec![
-                ("0100", "01b0244dfc267baca974a4caee06120321562784303a8a688976ae56170e4d175b"),
-                ("0101", "031155d54de65f0130fae142aa4cf5a7728b7c30f5939d33fddf077e2008040a15"),
-                ("0104", "01b845aea6b6c84a44d5b744f92cdf85ae9a56567180c6ae723381d84ea8519055"),
-                ("0105", "01bc3b3aa2bd908c858f304a7b2e60f4d63a46914b202c945fe8a561097bf42f3e"),
-                ("0106", "024d84dcce00d11890ea160665dd318bce2123e775d1467f22287734606345a3cb"),
-                ("0108", "027d90b26fb36632a88168029f9e05f6e45359eb8beea967c2a0bbbd158f6f8bf5"),
-                ("010a", "01d009c93a6a8a9c5426ae6c7e5fdd9df20fb7a7e705f7a355f5ce9cf7d8f5fd08"),
-                ("010b", "023505532f829490cbf058aeb5b72e3e615e942e87cad64713a3538f4c11c7085e"),
-                ("010d", "016155b15e75b047b88e56519778156195b4b5c4db7de0bc2da37f4227e462105c"),
-                ("010e", "0120c05b3c20ea1df2a3e6bc89398a760901732a76f3349c48abed8b346f2a24ea"),
-                ("010f", "0287987ca7bc4c44e0b8416e9171b7ac1dbdb4294b1565a132cccf15d04690b405"),
-                ("0111", "04e0fec8999767561145b62d55dbc4f36cefa4cabda986769dbc41746580d58bca"),
+                (
+                    "0100",
+                    "01b0244dfc267baca974a4caee06120321562784303a8a688976ae56170e4d175b",
+                ),
+                (
+                    "0101",
+                    "031155d54de65f0130fae142aa4cf5a7728b7c30f5939d33fddf077e2008040a15",
+                ),
+                (
+                    "0104",
+                    "01b845aea6b6c84a44d5b744f92cdf85ae9a56567180c6ae723381d84ea8519055",
+                ),
+                (
+                    "0105",
+                    "01bc3b3aa2bd908c858f304a7b2e60f4d63a46914b202c945fe8a561097bf42f3e",
+                ),
+                (
+                    "0106",
+                    "024d84dcce00d11890ea160665dd318bce2123e775d1467f22287734606345a3cb",
+                ),
+                (
+                    "0108",
+                    "027d90b26fb36632a88168029f9e05f6e45359eb8beea967c2a0bbbd158f6f8bf5",
+                ),
+                (
+                    "010a",
+                    "01d009c93a6a8a9c5426ae6c7e5fdd9df20fb7a7e705f7a355f5ce9cf7d8f5fd08",
+                ),
+                (
+                    "010b",
+                    "023505532f829490cbf058aeb5b72e3e615e942e87cad64713a3538f4c11c7085e",
+                ),
+                (
+                    "010d",
+                    "016155b15e75b047b88e56519778156195b4b5c4db7de0bc2da37f4227e462105c",
+                ),
+                (
+                    "010e",
+                    "0120c05b3c20ea1df2a3e6bc89398a760901732a76f3349c48abed8b346f2a24ea",
+                ),
+                (
+                    "010f",
+                    "0287987ca7bc4c44e0b8416e9171b7ac1dbdb4294b1565a132cccf15d04690b405",
+                ),
+                (
+                    "0111",
+                    "04e0fec8999767561145b62d55dbc4f36cefa4cabda986769dbc41746580d58bca",
+                ),
             ],
         );
     }
@@ -910,16 +1069,46 @@ mod tests {
             "f5f148ba4e16fb0ede5d026536f2a29c62b695055762659d6d5ab18126aae6bc",
             "1c0daccd1759bfd56f899e4b6c624acd00a9ce7e2c8957a5ff9deb619485ee05",
             vec![
-                ("0100", "01b0244dfc267baca974a4caee06120321562784303a8a688976ae56170e4d175b"),
-                ("0101", "031155d54de65f0130fae142aa4cf5a7728b7c30f5939d33fddf077e2008040a15"),
-                ("0104", "022e9e18180392c91ace964f24aff201511e891eddeed7c8049cfbe6dc0db6e9e1"),
-                ("0106", "025aa5ffce026d31f1ce6c410e5fdc2642c6467b94e9c3c4893056741cf81b1d96"),
-                ("0108", "01505afd8aae3aed665b41a96a1b204daefb9a45a7c37d77c722ec038c6c036db3"),
-                ("0109", "031d9d08fca843e5ba2eba0b5694ddc889576b3d845b2965573fb0b8b495299739"),
-                ("010c", "02df5de713b228b496be234356fa32e7f9d4f2e3b07bebbb21e4f052f2f41382f6"),
-                ("010e", "031773ce43367a6730c65411dd31f0bdfa046c3bf8dac329d50bfb07dafa5b22b2"),
-                ("0111", "0166824450c0052b7d01d13d744299df72aea39ad299cd477166763097aa4abeed"),
-                ("0112", "03e8ff7ce576a6172a0c957a14d7a1e850228a7c44a42befc1f7a229507c0fa0f2"),
+                (
+                    "0100",
+                    "01b0244dfc267baca974a4caee06120321562784303a8a688976ae56170e4d175b",
+                ),
+                (
+                    "0101",
+                    "031155d54de65f0130fae142aa4cf5a7728b7c30f5939d33fddf077e2008040a15",
+                ),
+                (
+                    "0104",
+                    "022e9e18180392c91ace964f24aff201511e891eddeed7c8049cfbe6dc0db6e9e1",
+                ),
+                (
+                    "0106",
+                    "025aa5ffce026d31f1ce6c410e5fdc2642c6467b94e9c3c4893056741cf81b1d96",
+                ),
+                (
+                    "0108",
+                    "01505afd8aae3aed665b41a96a1b204daefb9a45a7c37d77c722ec038c6c036db3",
+                ),
+                (
+                    "0109",
+                    "031d9d08fca843e5ba2eba0b5694ddc889576b3d845b2965573fb0b8b495299739",
+                ),
+                (
+                    "010c",
+                    "02df5de713b228b496be234356fa32e7f9d4f2e3b07bebbb21e4f052f2f41382f6",
+                ),
+                (
+                    "010e",
+                    "031773ce43367a6730c65411dd31f0bdfa046c3bf8dac329d50bfb07dafa5b22b2",
+                ),
+                (
+                    "0111",
+                    "0166824450c0052b7d01d13d744299df72aea39ad299cd477166763097aa4abeed",
+                ),
+                (
+                    "0112",
+                    "03e8ff7ce576a6172a0c957a14d7a1e850228a7c44a42befc1f7a229507c0fa0f2",
+                ),
             ],
         );
     }
@@ -942,7 +1131,8 @@ mod tests {
         // Height 100 fixture
         let header_id_hex = "6ba802b17c9598a15c8da1736e975e34143e93d799f5d2a9bc408bd2b3f19a1f";
         let extension_hash_hex = "e50f879c7bfb17d9049b61f784473b44b39c1c2dbc97a1b5ebe9956275050582";
-        let expected_extension_id_hex = "40a304a3ecc0f64004bcb5f4f4ae288ecd603e83b7625ed860d429bbaa1dae84";
+        let expected_extension_id_hex =
+            "40a304a3ecc0f64004bcb5f4f4ae288ecd603e83b7625ed860d429bbaa1dae84";
 
         let mut preimage = Vec::with_capacity(1 + 32 + 32);
         preimage.push(EXTENSION_MODIFIER_TYPE);
@@ -972,9 +1162,18 @@ mod tests {
     fn test_parse_serialize_roundtrip() {
         let header_id_hex = "80e4ce0c3337b62e7e1d98e0ee0131bbfb1b6472b543b1604caf9af331aa4e8d";
         let fields_data = vec![
-            ("0100", "01b0244dfc267baca974a4caee06120321562784303a8a688976ae56170e4d175b"),
-            ("0101", "028915208f1ea6fc521dc6c41160b73feba6b3e4e05850efe122032b0e3e220bd4"),
-            ("0103", "01db39f7e5927319f0c7e3fc82de2fd0d6254204d355aab2d0142ad28a5f6b4a49"),
+            (
+                "0100",
+                "01b0244dfc267baca974a4caee06120321562784303a8a688976ae56170e4d175b",
+            ),
+            (
+                "0101",
+                "028915208f1ea6fc521dc6c41160b73feba6b3e4e05850efe122032b0e3e220bd4",
+            ),
+            (
+                "0103",
+                "01db39f7e5927319f0c7e3fc82de2fd0d6254204d355aab2d0142ad28a5f6b4a49",
+            ),
         ];
 
         // Build Extension and serialize

@@ -47,7 +47,9 @@ impl WriteBatch {
         self.operations.push(BatchOperation {
             cf,
             key: key.into(),
-            kind: OperationKind::Put { value: value.into() },
+            kind: OperationKind::Put {
+                value: value.into(),
+            },
         });
     }
 

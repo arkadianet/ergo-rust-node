@@ -270,10 +270,7 @@ impl AutolykosV2 {
 
         // Check d < target (required for valid PoW)
         if d_abs >= target {
-            debug!(
-                "PoW v1 failed: d ({}) >= target ({})",
-                d_abs, target
-            );
+            debug!("PoW v1 failed: d ({}) >= target ({})", d_abs, target);
             return Ok(false);
         }
 
@@ -306,9 +303,9 @@ impl AutolykosV2 {
         let pk_bytes = solution.miner_pk.sigma_serialize_bytes().map_err(|e| {
             ConsensusError::InvalidPow(format!("Failed to serialize miner pk: {}", e))
         })?;
-        let w_bytes = w.sigma_serialize_bytes().map_err(|e| {
-            ConsensusError::InvalidPow(format!("Failed to serialize w: {}", e))
-        })?;
+        let w_bytes = w
+            .sigma_serialize_bytes()
+            .map_err(|e| ConsensusError::InvalidPow(format!("Failed to serialize w: {}", e)))?;
 
         // Calculate f = sum of elements mod q
         // Each element = hashModQ(idx || M || pk || msg || w)
@@ -506,7 +503,8 @@ impl AutolykosV2 {
         for &idx in indices {
             // Build input: idx || M || pk || msg || w
             let idx_bytes = idx.to_be_bytes();
-            let mut input = Vec::with_capacity(4 + BIG_M.len() + pk_bytes.len() + msg.len() + w_bytes.len());
+            let mut input =
+                Vec::with_capacity(4 + BIG_M.len() + pk_bytes.len() + msg.len() + w_bytes.len());
             input.extend_from_slice(&idx_bytes);
             input.extend_from_slice(&*BIG_M);
             input.extend_from_slice(pk_bytes);
@@ -690,10 +688,10 @@ mod tests {
     fn test_decode_compact_bits() {
         // Test known difficulty values (n_bits encodes difficulty, not target)
         let test_cases = vec![
-            (0x1d00ffffu32, true),  // Valid difficulty
-            (0x1b0404cbu32, true),  // Valid difficulty
-            (0x17034d4bu32, true),  // Valid difficulty
-            (0x070baaaau32, true),  // Real mainnet difficulty ~height 1M
+            (0x1d00ffffu32, true), // Valid difficulty
+            (0x1b0404cbu32, true), // Valid difficulty
+            (0x17034d4bu32, true), // Valid difficulty
+            (0x070baaaau32, true), // Real mainnet difficulty ~height 1M
         ];
 
         for (nbits, should_succeed) in test_cases {
@@ -757,7 +755,7 @@ mod tests {
         assert_eq!(verifier.calc_big_n(2, 600 * 1024), 70464240);
         assert_eq!(verifier.calc_big_n(2, 650 * 1024), 73987410);
         assert_eq!(verifier.calc_big_n(2, 700000), 73987410);
-        assert_eq!(verifier.calc_big_n(2, 788400), 81571035);  // 3 years
+        assert_eq!(verifier.calc_big_n(2, 788400), 81571035); // 3 years
         assert_eq!(verifier.calc_big_n(2, 1051200), 104107290); // 4 years
         assert_eq!(verifier.calc_big_n(2, 4198400), 2143944600); // max height
         assert_eq!(verifier.calc_big_n(2, 41984000), 2143944600); // beyond max
@@ -768,10 +766,9 @@ mod tests {
         let verifier = AutolykosV2::new();
         // Use a non-trivial seed to exercise sliding window
         let seed: [u8; 32] = [
-            0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
-            0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54, 0x32, 0x10,
-            0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
-            0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
+            0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54,
+            0x32, 0x10, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb,
+            0xcc, 0xdd, 0xee, 0xff,
         ];
         let big_n = 1u32 << DEFAULT_N_EXPONENT;
         let indices = verifier.gen_indexes(&seed, big_n);
@@ -783,7 +780,10 @@ mod tests {
 
         // Verify sliding window produces different indices (not all same)
         let unique: std::collections::HashSet<_> = indices.iter().collect();
-        assert!(unique.len() > 1, "sliding window should produce varied indices");
+        assert!(
+            unique.len() > 1,
+            "sliding window should produce varied indices"
+        );
     }
 
     #[test]
@@ -870,8 +870,8 @@ mod tests {
 
     #[test]
     fn test_malformed_header_no_panic() {
-        use sigma_ser::ScorexSerializable;
         use ergo_chain_types::Header;
+        use sigma_ser::ScorexSerializable;
 
         // Empty bytes
         assert!(Header::scorex_parse_bytes(&[]).is_err());
@@ -891,7 +891,10 @@ mod tests {
 
         // Get reference hit from sigma-rust via NipopowAlgos
         let nipopow = NipopowAlgos::default();
-        let reference_hit = nipopow.pow_scheme.pow_hit(&header).expect("reference pow_hit failed");
+        let reference_hit = nipopow
+            .pow_scheme
+            .pow_hit(&header)
+            .expect("reference pow_hit failed");
 
         // Get our computed values for debugging
         let verifier = AutolykosV2::new();
@@ -899,7 +902,8 @@ mod tests {
 
         let big_n = verifier.calc_big_n(header.version, header.height);
         let msg = AutolykosV2::calculate_msg(&header_bytes);
-        let seed = AutolykosV2::calc_seed_v2(big_n, &msg, &header.autolykos_solution.nonce, header.height);
+        let seed =
+            AutolykosV2::calc_seed_v2(big_n, &msg, &header.autolykos_solution.nonce, header.height);
         let indices = verifier.gen_indexes(&seed, big_n);
         let sum = AutolykosV2::calc_elements_sum(&indices, header.height);
         let hit = AutolykosV2::calc_hit(&sum);
@@ -919,6 +923,9 @@ mod tests {
         eprintln!("our hit: {}", our_hit);
         eprintln!("ref hit: {}", ref_hit);
 
-        assert_eq!(our_hit, ref_hit, "hit values must match sigma-rust reference");
+        assert_eq!(
+            our_hit, ref_hit,
+            "hit values must match sigma-rust reference"
+        );
     }
 }

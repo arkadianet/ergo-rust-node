@@ -49,19 +49,19 @@ pub use block_validation::{
     BlockValidationResult, CreatedBox, FullBlockValidator, SpentBox, ValidatedStateChange,
 };
 pub use chain_params::{param_ids, ChainParameters, VOTING_EPOCH_LENGTH};
+pub use chain_params::{ChainParams, ChainParamsConfig, ChainParamsError};
 pub use cost::{
     calculate_base_cost, estimate_tx_cost, CostAccumulator, CostConstants, CostError,
     TransactionCostResult,
 };
 pub use difficulty::{calculate_required_difficulty, DifficultyAdjustment, HeaderForDifficulty};
-pub use error::{ConsensusError, ConsensusResult};
-pub use params::AUTOLYKOS_V2_ACTIVATION_HEIGHT;
-pub use chain_params::{ChainParams, ChainParamsConfig, ChainParamsError};
 pub use eip37_difficulty::{Eip37DifficultyCalculator, EpochHeader};
+pub use error::{ConsensusError, ConsensusResult};
 pub use extension::{
     verify_extension_root, Extension, ExtensionField, ExtensionParseError, EMPTY_MERKLE_ROOT,
     FIELD_KEY_SIZE, FIELD_VALUE_MAX_SIZE, MAX_EXTENSION_SIZE,
 };
+pub use params::AUTOLYKOS_V2_ACTIVATION_HEIGHT;
 pub use validation::{BlockValidator, HeaderValidator, TransactionValidator};
 
 /// Ergo network parameters.

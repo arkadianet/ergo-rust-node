@@ -1,10 +1,10 @@
 //! Connection handling.
 
-use crate::{NetworkError, NetworkResult, Message, PeerId};
+use crate::{Message, NetworkError, NetworkResult, PeerId};
 use std::net::SocketAddr;
 use std::time::Duration;
-use tokio::net::TcpStream;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
 use tracing::{debug, instrument};
 
 /// Connection configuration.
@@ -57,13 +57,10 @@ impl Connection {
     /// Connect to a remote peer.
     #[instrument(skip(config))]
     pub async fn connect(addr: SocketAddr, config: ConnectionConfig) -> NetworkResult<Self> {
-        let stream = tokio::time::timeout(
-            config.connect_timeout,
-            TcpStream::connect(addr),
-        )
-        .await
-        .map_err(|_| NetworkError::Timeout("Connection timeout".to_string()))?
-        .map_err(NetworkError::Io)?;
+        let stream = tokio::time::timeout(config.connect_timeout, TcpStream::connect(addr))
+            .await
+            .map_err(|_| NetworkError::Timeout("Connection timeout".to_string()))?
+            .map_err(NetworkError::Io)?;
 
         debug!("Connected to {}", addr);
 

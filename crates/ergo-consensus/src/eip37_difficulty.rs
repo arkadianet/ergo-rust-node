@@ -93,7 +93,11 @@ impl<'a> Eip37DifficultyCalculator<'a> {
     /// 4. avg = (classicDiff + limitedPredictiveDiff) / 2
     /// 5. uncompressedDiff = clamp avg to [1/2, 3/2] of lastDiff
     /// 6. return decodeCompactBits(encodeCompactBits(uncompressedDiff))
-    fn eip37_calculate(&self, headers: &[EpochHeader], epoch_length: u32) -> ConsensusResult<BigInt> {
+    fn eip37_calculate(
+        &self,
+        headers: &[EpochHeader],
+        epoch_length: u32,
+    ) -> ConsensusResult<BigInt> {
         let last_diff = &headers.last().unwrap().difficulty;
 
         // Step 1: Predictive difficulty via linear regression
@@ -144,7 +148,11 @@ impl<'a> Eip37DifficultyCalculator<'a> {
     }
 
     /// Pre-EIP-37 difficulty calculation.
-    fn pre_eip37_calculate(&self, headers: &[EpochHeader], epoch_length: u32) -> ConsensusResult<BigInt> {
+    fn pre_eip37_calculate(
+        &self,
+        headers: &[EpochHeader],
+        epoch_length: u32,
+    ) -> ConsensusResult<BigInt> {
         let last_diff = &headers.last().unwrap().difficulty;
 
         // Linear regression
@@ -165,7 +173,12 @@ impl<'a> Eip37DifficultyCalculator<'a> {
     /// Bitcoin-style difficulty calculation (Scala: bitcoinCalculate).
     ///
     /// difficulty = end.difficulty * desiredInterval * epochLength / (end.timestamp - start.timestamp)
-    fn bitcoin_calculate(&self, start: &EpochHeader, end: &EpochHeader, epoch_length: u32) -> BigInt {
+    fn bitcoin_calculate(
+        &self,
+        start: &EpochHeader,
+        end: &EpochHeader,
+        epoch_length: u32,
+    ) -> BigInt {
         let desired_interval = BigInt::from(self.params.block_interval_ms);
         let epoch_len = BigInt::from(epoch_length);
         let time_diff = BigInt::from(end.timestamp) - BigInt::from(start.timestamp);
@@ -436,7 +449,10 @@ mod tests {
         let decoded = decode_compact_bits(encoded).unwrap();
 
         // Should NOT equal original (lossy)
-        assert_ne!(decoded, value, "Compact bits should be lossy for values exceeding mantissa precision");
+        assert_ne!(
+            decoded, value,
+            "Compact bits should be lossy for values exceeding mantissa precision"
+        );
 
         // Should equal truncated value
         assert_eq!(decoded, BigInt::from(0x12345600u32));

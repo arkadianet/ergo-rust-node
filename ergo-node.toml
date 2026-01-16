@@ -2,7 +2,7 @@
 # See docs/IMPLEMENTATION_PLAN.md for details
 
 # Node identification
-node_name = "ergo-rust-node"
+node_name = "arks-ergo-rust-node"
 
 # Network: "mainnet" or "testnet"
 network = "mainnet"
@@ -15,14 +15,14 @@ state_type = "utxo"
 
 [network_config]
 # P2P network bind address
-bind_address = "0.0.0.0:9030"
+bind_address = "0.0.0.0:9031"
 
 # Declared public address (optional, for NAT traversal)
 # declared_address = "1.2.3.4:9030"
 
 # Known peers for initial connection
 known_peers = [
-    "49.12.210.225:9030",
+    "127.0.0.1:9030",
 ]
 
 # Maximum total connections
@@ -33,7 +33,7 @@ max_outbound = 10
 
 [api]
 # API server bind address
-bind_address = "127.0.0.1:9053"
+bind_address = "127.0.0.1:9054"
 
 # API key for protected endpoints (optional)
 # api_key = "your-secret-api-key"

@@ -1964,16 +1964,13 @@ impl SyncProtocol {
             // Try to find the height for this block to make debugging easier
             let height = {
                 let chain = self.header_chain.read();
-                chain
-                    .tx_id_to_header_id
-                    .get(id)
-                    .and_then(|header_id| {
-                        chain
-                            .headers
-                            .iter()
-                            .find(|h| h.id.0.as_ref() == header_id.as_slice())
-                            .map(|h| h.height)
-                    })
+                chain.tx_id_to_header_id.get(id).and_then(|header_id| {
+                    chain
+                        .headers
+                        .iter()
+                        .find(|h| h.id.0.as_ref() == header_id.as_slice())
+                        .map(|h| h.height)
+                })
             };
             warn!(
                 id = hex::encode(id),

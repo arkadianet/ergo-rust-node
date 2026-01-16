@@ -367,7 +367,7 @@ mod tests {
         MiningTask {
             header_bytes: vec![0u8; 204],
             n_bits: 0x2100ffff, // Very easy target - should find solution quickly
-            version: 2,        // Autolykos v2
+            version: 2,         // Autolykos v2
             height: 100_000,
             miner_pk: Box::new(ergo_chain_types::ec_point::identity()),
             created_at: 0,
@@ -416,7 +416,7 @@ mod tests {
         let hard_task = MiningTask {
             header_bytes: vec![0u8; 204],
             n_bits: 0x17034d4b, // Very hard target
-            version: 2,        // Autolykos v2
+            version: 2,         // Autolykos v2
             height: 100_000,
             miner_pk: Box::new(ergo_chain_types::ec_point::identity()),
             created_at: 0,
@@ -447,7 +447,7 @@ mod tests {
         let hard_task = MiningTask {
             header_bytes: vec![0u8; 204],
             n_bits: 0x17034d4b, // Very hard target - won't find solution
-            version: 2,        // Autolykos v2
+            version: 2,         // Autolykos v2
             height: 100_000,
             miner_pk: Box::new(ergo_chain_types::ec_point::identity()),
             created_at: 0,

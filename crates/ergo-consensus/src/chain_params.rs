@@ -163,7 +163,11 @@ pub struct ChainParamsError {
 
 impl fmt::Display for ChainParamsError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "ChainParams error for '{}': {}", self.field, self.message)
+        write!(
+            f,
+            "ChainParams error for '{}': {}",
+            self.field, self.message
+        )
     }
 }
 
@@ -259,8 +263,8 @@ impl ChainParams {
             precision_constant: 1_000_000_000, // 10^9
             initial_difficulty,
             autolykos_v2_activation_height: 417_792,
-            n_increase_start: 614_400,  // 600 * 1024
-            n_increase_period: 51_200,  // 50 * 1024
+            n_increase_start: 614_400, // 600 * 1024
+            n_increase_period: 51_200, // 50 * 1024
         }
     }
 
@@ -324,12 +328,12 @@ impl ChainParams {
                 message: "required field missing".to_string(),
             })?,
             initial_difficulty,
-            autolykos_v2_activation_height: config
-                .autolykos_v2_activation_height
-                .ok_or_else(|| ChainParamsError {
+            autolykos_v2_activation_height: config.autolykos_v2_activation_height.ok_or_else(
+                || ChainParamsError {
                     field: "autolykos_v2_activation_height",
                     message: "required field missing".to_string(),
-                })?,
+                },
+            )?,
             n_increase_start: config.n_increase_start.ok_or_else(|| ChainParamsError {
                 field: "n_increase_start",
                 message: "required field missing".to_string(),
