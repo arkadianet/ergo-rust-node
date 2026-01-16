@@ -296,6 +296,17 @@ impl BlockDownloader {
         timed_out
     }
 
+    /// Get all in-flight download IDs assigned to a specific peer.
+    /// Used to fail downloads when a peer disconnects.
+    pub fn get_in_flight_for_peer(&self, peer: &PeerId) -> Vec<Vec<u8>> {
+        self.in_flight
+            .read()
+            .iter()
+            .filter(|(_, p)| *p == peer)
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
     /// Get download statistics.
     pub fn stats(&self) -> DownloadStats {
         DownloadStats {

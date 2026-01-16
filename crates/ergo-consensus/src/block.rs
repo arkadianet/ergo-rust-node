@@ -17,6 +17,35 @@ pub use ergo_lib::ergotree_ir::chain::token::{Token, TokenAmount, TokenId};
 
 use ergo_chain_types::AutolykosSolution;
 
+/// VLQ decode an unsigned integer from a byte slice.
+/// Returns (value, bytes_consumed) on success.
+fn vlq_decode(data: &[u8]) -> Result<(u64, usize), &'static str> {
+    let mut result: u64 = 0;
+    let mut shift = 0;
+    let mut pos = 0;
+
+    loop {
+        if pos >= data.len() {
+            return Err("Truncated VLQ");
+        }
+        let byte = data[pos];
+        pos += 1;
+
+        result |= ((byte & 0x7F) as u64) << shift;
+
+        if (byte & 0x80) == 0 {
+            break;
+        }
+        shift += 7;
+
+        if shift > 63 {
+            return Err("VLQ overflow");
+        }
+    }
+
+    Ok((result, pos))
+}
+
 /// Create a minimal "genesis parent" header for use when validating the genesis block (height 1).
 /// This header has height 0 and all-zero IDs, serving as the virtual parent of the genesis block.
 pub fn genesis_parent_header() -> Header {
@@ -386,6 +415,7 @@ pub enum BlockTransactionsParseError {
 }
 
 // Extension and ExtensionField are defined in crate::extension
+// Extension::parse_parameters() is available there as well
 
 /// Authenticated data structure proofs.
 #[derive(Debug, Clone)]

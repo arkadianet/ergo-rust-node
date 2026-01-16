@@ -38,6 +38,64 @@ use ergo_chain_types::{BlockId, Digest32};
 use ergo_merkle_tree::{MerkleNode, MerkleTree};
 use std::collections::HashSet;
 
+// ============================================================================
+// VLQ (Variable Length Quantity) encoding/decoding
+// ============================================================================
+//
+// Scorex's putUShort/getUShort use VLQ encoding, not fixed-width integers.
+// VLQ is a little-endian continuation-bit encoding:
+// - Bit 7 (0x80) = continuation flag (1 = more bytes follow)
+// - Bits 0-6 = 7 bits of value (little-endian order)
+
+/// Encode a u64 value as VLQ bytes.
+fn vlq_encode(mut value: u64) -> Vec<u8> {
+    let mut result = Vec::new();
+    loop {
+        let mut byte = (value & 0x7F) as u8;
+        value >>= 7;
+        if value != 0 {
+            byte |= 0x80; // Set continuation bit
+        }
+        result.push(byte);
+        if value == 0 {
+            break;
+        }
+    }
+    result
+}
+
+/// Decode a VLQ value from bytes. Returns (value, bytes_consumed).
+fn vlq_decode(data: &[u8]) -> Result<(u64, usize), &'static str> {
+    let mut result: u64 = 0;
+    let mut shift = 0;
+    let mut pos = 0;
+    loop {
+        if pos >= data.len() {
+            return Err("Truncated VLQ");
+        }
+        let byte = data[pos];
+        pos += 1;
+        result |= ((byte & 0x7F) as u64) << shift;
+        if (byte & 0x80) == 0 {
+            break;
+        }
+        shift += 7;
+        if shift > 63 {
+            return Err("VLQ overflow");
+        }
+    }
+    Ok((result, pos))
+}
+
+/// Calculate the number of bytes needed to encode a value as VLQ.
+fn vlq_size(value: u64) -> usize {
+    if value == 0 {
+        return 1;
+    }
+    let bits = 64 - value.leading_zeros() as usize;
+    (bits + 6) / 7 // Ceiling division by 7
+}
+
 /// Extension field key size (bytes).
 pub const FIELD_KEY_SIZE: usize = 2;
 
@@ -118,40 +176,89 @@ impl Extension {
         None
     }
 
-    /// Get system parameters from extension.
+    /// System parameters prefix in extension keys.
+    /// Parameters are stored with key format: [0x00, param_id]
+    pub const SYSTEM_PARAMS_PREFIX: u8 = 0x00;
+
+    /// Parse system parameters from extension fields.
     ///
-    /// Parameters are stored under reserved extension keys (see Scala parameter key constants).
-    /// Full parsing is deferred.
+    /// Parameters in Ergo extensions are stored as:
+    /// - Key: 2 bytes - [SYSTEM_PARAMS_PREFIX (0x00), param_id]
+    /// - Value: 4 bytes - big-endian signed 32-bit integer
+    ///
+    /// Returns a map of parameter_id -> value, or an error if parsing fails.
+    pub fn parse_parameters(
+        &self,
+    ) -> Result<std::collections::HashMap<u8, i32>, crate::ConsensusError> {
+        use std::collections::HashMap;
+
+        let mut params = HashMap::new();
+
+        for field in &self.fields {
+            // Check for system parameter prefix
+            if field.key[0] == Self::SYSTEM_PARAMS_PREFIX {
+                let param_id = field.key[1];
+
+                // Skip special keys (soft-fork related, etc.)
+                // Param IDs 1-8 are the core votable parameters
+                // IDs >= 120 are soft-fork voting related
+                if param_id >= 120 {
+                    continue;
+                }
+
+                // Values must be exactly 4 bytes (big-endian i32)
+                if field.value.len() != 4 {
+                    return Err(crate::ConsensusError::InvalidExtension(format!(
+                        "Parameter {} has invalid value length: {} (expected 4)",
+                        param_id,
+                        field.value.len()
+                    )));
+                }
+
+                let value = i32::from_be_bytes([
+                    field.value[0],
+                    field.value[1],
+                    field.value[2],
+                    field.value[3],
+                ]);
+
+                params.insert(param_id, value);
+            }
+        }
+
+        Ok(params)
+    }
+
+    /// Get system parameters from extension (legacy method).
+    #[deprecated(note = "Use parse_parameters() instead")]
     pub fn parameters(&self) -> Vec<(u8, u64)> {
-        // TODO: implement parameter parsing
-        Vec::new()
+        self.parse_parameters()
+            .map(|params| {
+                params
+                    .into_iter()
+                    .filter_map(|(k, v)| u64::try_from(v).ok().map(|u| (k, u)))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// Serialize extension to bytes (Scala-compatible format).
     ///
     /// Format:
     /// - header_id: 32 bytes
-    /// - field_count: u16 big-endian
+    /// - field_count: VLQ encoded
     /// - for each field:
     ///   - key: 2 bytes
     ///   - value_len: u8
     ///   - value: variable bytes
     pub fn serialize(&self) -> Vec<u8> {
-        // Under the 32KB size cap, we can't have more than ~490 fields (each min 3 bytes).
-        // But guard against programming errors anyway.
-        debug_assert!(
-            self.fields.len() <= u16::MAX as usize,
-            "field count {} exceeds u16::MAX",
-            self.fields.len()
-        );
-
         let mut buf = Vec::with_capacity(self.serialized_size());
 
         // Header ID (32 bytes)
         buf.extend_from_slice(self.header_id.0.as_ref());
 
-        // Field count (u16 big-endian)
-        buf.extend_from_slice(&(self.fields.len() as u16).to_be_bytes());
+        // Field count (VLQ encoded)
+        buf.extend_from_slice(&vlq_encode(self.fields.len() as u64));
 
         // Fields
         for field in &self.fields {
@@ -165,7 +272,8 @@ impl Extension {
 
     /// Total serialized size.
     pub fn serialized_size(&self) -> usize {
-        32 + 2 + self.fields.iter().map(|f| f.serialized_size()).sum::<usize>()
+        32 + vlq_size(self.fields.len() as u64)
+            + self.fields.iter().map(|f| f.serialized_size()).sum::<usize>()
     }
 
     /// Parse extension from bytes (Scala-compatible format).
@@ -176,7 +284,8 @@ impl Extension {
     /// Trailing bytes are ignored, which matches Scala's reader-based parsing in a
     /// length-delimited modifier context. Callers should pass the exact modifier slice.
     pub fn parse(data: &[u8]) -> Result<Self, ExtensionParseError> {
-        if data.len() < 34 {
+        // Minimum: 32 (header_id) + 1 (VLQ min) = 33 bytes
+        if data.len() < 33 {
             return Err(ExtensionParseError::TooShort);
         }
 
@@ -189,9 +298,27 @@ impl Extension {
         let header_id = BlockId(Digest32::from(header_bytes));
         pos += 32;
 
-        // Field count (u16 big-endian)
-        let field_count = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
-        pos += 2;
+        // Field count (VLQ encoded)
+        let (field_count_u64, vlq_len) = vlq_decode(&data[pos..])
+            .map_err(|e| ExtensionParseError::InvalidFormat(e.to_string()))?;
+        pos += vlq_len;
+
+        // Enforce UShort semantics (0..65535) even though VLQ can encode larger
+        if field_count_u64 > 0xFFFF {
+            return Err(ExtensionParseError::InvalidFormat(
+                "field count exceeds UShort max (65535)".to_string(),
+            ));
+        }
+        let field_count = field_count_u64 as usize;
+
+        // Sanity check: each field is at least 3 bytes (2 key + 1 len + 0 value)
+        let remaining = data.len().saturating_sub(pos);
+        if field_count > 0 && field_count * 3 > remaining {
+            return Err(ExtensionParseError::InvalidFormat(format!(
+                "field count {} impossible with {} remaining bytes",
+                field_count, remaining
+            )));
+        }
 
         // Parse fields
         let mut fields = Vec::with_capacity(field_count);

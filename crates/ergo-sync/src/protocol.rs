@@ -69,6 +69,13 @@ pub enum SyncCommand {
         block_id: Vec<u8>,
         block_data: Vec<u8>,
     },
+    /// Store a received extension.
+    StoreExtension {
+        /// Header ID this extension belongs to.
+        header_id: Vec<u8>,
+        /// Raw extension data.
+        extension_data: Vec<u8>,
+    },
     /// Add a transaction to the mempool.
     AddTransaction {
         tx_id: Vec<u8>,
@@ -800,6 +807,21 @@ impl SyncProtocol {
         info!(peer = %peer, "Peer disconnected");
         self.sync_peers.write().remove(peer);
         self.synchronizer.remove_peer(peer);
+
+        // Fail all in-flight downloads assigned to this peer so they can be retried
+        // with other peers. This prevents downloads from getting stuck when a peer
+        // disconnects without delivering the requested blocks.
+        let in_flight_for_peer = self.downloader.get_in_flight_for_peer(peer);
+        if !in_flight_for_peer.is_empty() {
+            info!(
+                peer = %peer,
+                count = in_flight_for_peer.len(),
+                "Failing in-flight downloads for disconnected peer"
+            );
+            for id in in_flight_for_peer {
+                self.downloader.fail(&id, peer);
+            }
+        }
     }
 
     /// Handle received SyncInfo.
@@ -1170,8 +1192,7 @@ impl SyncProtocol {
                 self.on_block_received(&peer, id, data).await?;
             }
             Some(ModifierType::Extension) => {
-                // Handle extension
-                debug!(id = hex::encode(&id), "Received extension");
+                self.on_extension_received(&peer, id, data).await?;
             }
             Some(ModifierType::ADProofs) => {
                 // Handle AD proofs
@@ -1673,6 +1694,60 @@ impl SyncProtocol {
         Ok(())
     }
 
+    /// Handle received extension.
+    ///
+    /// Extensions contain protocol parameters at epoch boundaries (every 1024 blocks).
+    /// We need to store them so parameters can be loaded on node restart.
+    async fn on_extension_received(
+        &self,
+        _peer: &PeerId,
+        id: Vec<u8>,
+        data: Vec<u8>,
+    ) -> SyncResult<()> {
+        use ergo_consensus::Extension;
+
+        debug!(
+            id = hex::encode(&id),
+            size = data.len(),
+            "Processing extension"
+        );
+
+        // Parse the extension to extract the header ID
+        let extension = match Extension::parse(&data) {
+            Ok(ext) => ext,
+            Err(e) => {
+                warn!(id = hex::encode(&id), error = ?e, "Failed to parse Extension");
+                // Mark as completed anyway to avoid re-requesting
+                self.downloader.complete(&id);
+                return Ok(());
+            }
+        };
+
+        let header_id = extension.header_id.0.as_ref().to_vec();
+
+        debug!(
+            extension_id = hex::encode(&id),
+            header_id = hex::encode(&header_id),
+            fields = extension.fields.len(),
+            "Parsed Extension"
+        );
+
+        // Mark as downloaded
+        self.downloader.complete(&id);
+
+        // Send command to store the extension
+        let cmd = SyncCommand::StoreExtension {
+            header_id,
+            extension_data: data,
+        };
+        self.command_tx
+            .send(cmd)
+            .await
+            .map_err(|e| SyncError::Internal(format!("Failed to send command: {}", e)))?;
+
+        Ok(())
+    }
+
     /// Handle received transaction.
     async fn on_transaction_received(
         &self,
@@ -1788,14 +1863,20 @@ impl SyncProtocol {
                     &header_id,
                     header.transaction_root.0.as_ref(),
                 );
-                (header.clone(), transactions_id, header_id)
+                // Compute extension ID from header ID and extension root
+                let extension_id = compute_block_section_id(
+                    ModifierType::Extension.to_byte(),
+                    &header_id,
+                    header.extension_root.0.as_ref(),
+                );
+                (header.clone(), transactions_id, extension_id, header_id)
             })
             .collect();
 
         // Batch update header chain under single lock
         {
             let mut chain = self.header_chain.write();
-            for (header, transactions_id, header_id) in &header_infos {
+            for (header, transactions_id, _extension_id, header_id) in &header_infos {
                 if !chain.tx_id_to_header_id.contains_key(transactions_id) {
                     // Use track_header which populates lookup indexes but NOT missing_blocks
                     // since we queue downloads directly via the downloader below
@@ -1808,11 +1889,16 @@ impl SyncProtocol {
             // Headers will be removed via remove_header() when blocks are applied.
         }
 
-        // Create download tasks
-        for (_, transactions_id, _) in header_infos {
-            let task =
+        // Create download tasks for both block transactions and extensions
+        for (_, transactions_id, extension_id, _) in header_infos {
+            // Request block transactions
+            let tx_task =
                 DownloadTask::new(transactions_id, ModifierType::BlockTransactions.to_byte());
-            tasks.push(task);
+            tasks.push(tx_task);
+
+            // Request extension (contains protocol parameters at epoch boundaries)
+            let ext_task = DownloadTask::new(extension_id, ModifierType::Extension.to_byte());
+            tasks.push(ext_task);
         }
 
         // Queue all tasks at once
@@ -1869,13 +1955,18 @@ impl SyncProtocol {
 
         // Check for block download timeouts
         let timed_out = self.downloader.check_timeouts();
-        for (id, peer) in timed_out {
+
+        // Track timeouts per peer to detect unresponsive peers
+        let mut timeouts_per_peer: std::collections::HashMap<PeerId, u32> =
+            std::collections::HashMap::new();
+
+        for (id, peer) in &timed_out {
             // Try to find the height for this block to make debugging easier
             let height = {
                 let chain = self.header_chain.read();
                 chain
                     .tx_id_to_header_id
-                    .get(&id)
+                    .get(id)
                     .and_then(|header_id| {
                         chain
                             .headers
@@ -1885,12 +1976,28 @@ impl SyncProtocol {
                     })
             };
             warn!(
-                id = hex::encode(&id),
+                id = hex::encode(id),
                 peer = %peer,
                 height = ?height,
                 "Block download timed out - peer may not have this block at this ID"
             );
-            self.downloader.fail(&id, &peer);
+            self.downloader.fail(id, peer);
+            *timeouts_per_peer.entry(peer.clone()).or_insert(0) += 1;
+        }
+
+        // If a peer has too many timeouts in one tick, it's likely unresponsive.
+        // Remove it from sync peers so we stop sending requests to it.
+        const MAX_TIMEOUTS_PER_TICK: u32 = 10;
+        for (peer, count) in timeouts_per_peer {
+            if count >= MAX_TIMEOUTS_PER_TICK {
+                warn!(
+                    peer = %peer,
+                    timeout_count = count,
+                    "Removing unresponsive peer due to excessive timeouts"
+                );
+                self.sync_peers.write().remove(&peer);
+                self.synchronizer.remove_peer(&peer);
+            }
         }
 
         // Check for header request timeouts and re-queue them

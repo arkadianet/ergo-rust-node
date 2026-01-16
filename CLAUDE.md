@@ -46,6 +46,8 @@ This project implements a full Ergo blockchain node in Rust, capable of:
 
 ## Architecture
 
+For a comprehensive overview of how the node operates, syncs, and processes data, see **[node-architecture.md](node-architecture.md)**. This document should be kept up-to-date when making architectural changes.
+
 ### Crate Structure
 
 ```
@@ -274,10 +276,47 @@ The Rust node MUST produce byte-identical serialization to the Scala node. Incor
 
 ### Testing Strategy
 
+**⚠️ CRITICAL: Base tests on Scala node tests for compatibility**
+
+When adding new functionality or modifying existing code, tests MUST be written to ensure compatibility with the Scala reference implementation. This is essential for P2P messaging and consensus correctness.
+
+**Testing requirements:**
+1. **Always write tests** for new functionality when possible
+2. **Base tests on Scala node tests** - Find the corresponding test in the Scala codebase and port it to Rust
+3. **Use test vectors from Scala** - Extract serialization bytes, expected hashes, and other values from Scala tests
+4. **Verify byte-for-byte compatibility** - For serialization code, ensure identical output to Scala
+
+**Key Scala test locations** (in `/home/luivatra/develop/ergo/ergo`):
+- `ergo-core/src/test/scala/org/ergoplatform/modifiers/` - Block, transaction, extension tests
+- `ergo-core/src/test/scala/org/ergoplatform/network/` - P2P message serialization tests
+- `ergo-core/src/test/scala/org/ergoplatform/serialization/` - General serialization tests
+- `src/test/scala/org/ergoplatform/nodeView/` - State and history tests
+
+**Test categories:**
 1. **Unit tests**: Each crate has isolated tests
 2. **Integration tests**: Cross-crate functionality in `tests/`
-3. **Compatibility tests**: Verify against Scala node responses
+3. **Compatibility tests**: Verify against Scala node test vectors and responses
 4. **Sync tests**: Full chain synchronization on testnet
+
+**Example: Porting a Scala test to Rust**
+```rust
+// In Scala (ErgoTransactionSpec.scala):
+// val bytes = Base16.decode("02c95c2ccf55e03...").get
+// val tx = TransactionSerializer.parseBytes(bytes)
+// tx.id shouldBe ModifierId @@ "b59ca51f7470f291..."
+
+// In Rust:
+#[test]
+fn test_transaction_serialization_compat() {
+    let bytes = hex::decode("02c95c2ccf55e03...").unwrap();
+    let tx = Transaction::sigma_parse_bytes(&bytes).unwrap();
+    assert_eq!(hex::encode(tx.id().0), "b59ca51f7470f291...");
+    
+    // Verify round-trip produces identical bytes
+    let reserialized = tx.sigma_serialize_bytes().unwrap();
+    assert_eq!(reserialized, bytes, "Round-trip serialization mismatch");
+}
+```
 
 ### Building
 
@@ -339,6 +378,10 @@ Address derivation must match existing Ergo wallets:
 
 ## References
 
+**Internal Documentation:**
+- [node-architecture.md](node-architecture.md) - Detailed architecture documentation (keep updated with changes)
+
+**External References:**
 - [Ergo Protocol Specification](https://docs.ergoplatform.com/protocol/)
 - [Ergo Scala Node](https://github.com/ergoplatform/ergo)
 - [sigma-rust Library](https://github.com/ergoplatform/sigma-rust)

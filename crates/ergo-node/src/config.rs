@@ -33,6 +33,9 @@ pub struct NodeConfig {
     /// Wallet configuration.
     #[serde(default)]
     pub wallet: WalletConfig,
+    /// Validation configuration.
+    #[serde(default)]
+    pub validation: ValidationConfig,
 }
 
 /// Default blocks to keep (-1 = keep all).
@@ -154,6 +157,43 @@ impl Default for WalletConfig {
     }
 }
 
+/// Validation configuration.
+///
+/// Controls transaction and block validation limits.
+/// These settings affect mempool acceptance and API validation.
+/// Block validation during sync uses dynamic parameters from the blockchain.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ValidationConfig {
+    /// Maximum transaction cost for mempool validation.
+    /// Transactions exceeding this cost will be rejected from the mempool.
+    /// This is a node-local limit, not a consensus rule.
+    /// Default: 4,900,000 (matches Scala mainnet.conf)
+    #[serde(default = "default_max_transaction_cost")]
+    pub max_transaction_cost: u64,
+
+    /// Maximum transaction size in bytes for mempool validation.
+    /// Default: 98,304 (96 KB)
+    #[serde(default = "default_max_transaction_size")]
+    pub max_transaction_size: usize,
+}
+
+fn default_max_transaction_cost() -> u64 {
+    4_900_000 // Matches Scala mainnet.conf
+}
+
+fn default_max_transaction_size() -> usize {
+    98_304 // 96 KB
+}
+
+impl Default for ValidationConfig {
+    fn default() -> Self {
+        Self {
+            max_transaction_cost: default_max_transaction_cost(),
+            max_transaction_size: default_max_transaction_size(),
+        }
+    }
+}
+
 impl NodeConfig {
     /// Load configuration from file and CLI args.
     pub fn load(config_path: &Path, args: &Args) -> Result<Self> {
@@ -219,6 +259,7 @@ impl NodeConfig {
             api: ApiConfig::default(),
             mining: MiningConfig::default(),
             wallet: WalletConfig::default(),
+            validation: ValidationConfig::default(),
         }
     }
 

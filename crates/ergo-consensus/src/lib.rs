@@ -24,7 +24,7 @@
 mod autolykos;
 pub mod block;
 pub mod block_validation;
-mod chain_params;
+pub mod chain_params;
 pub mod cost;
 mod difficulty;
 mod eip37_difficulty;
@@ -48,6 +48,7 @@ pub use block::{
 pub use block_validation::{
     BlockValidationResult, CreatedBox, FullBlockValidator, SpentBox, ValidatedStateChange,
 };
+pub use chain_params::{param_ids, ChainParameters, VOTING_EPOCH_LENGTH};
 pub use cost::{
     calculate_base_cost, estimate_tx_cost, CostAccumulator, CostConstants, CostError,
     TransactionCostResult,
