@@ -174,6 +174,54 @@ impl HeaderStore {
         Ok(headers)
     }
 
+    /// Rebuild the height-to-header index from scratch.
+    ///
+    /// This repairs the HEADER_CHAIN column by iterating through all stored headers
+    /// and rebuilding the height -> block_id mapping. Call this when `get_by_height`
+    /// returns None for heights that should exist.
+    ///
+    /// Returns the number of entries rebuilt.
+    pub fn rebuild_height_index(&self) -> StateResult<u32> {
+        info!("Rebuilding header height index from stored headers...");
+
+        let mut batch = WriteBatch::new();
+        let mut count = 0u32;
+        let mut max_height = 0u32;
+
+        // Iterate through all headers in the HEADERS column
+        let iter = self.storage.iter(columns::HEADERS)?;
+        for (key, value) in iter {
+            // Parse the header to get its height
+            if let Ok(header) = Header::scorex_parse_bytes(&value) {
+                let height = header.height;
+                let height_key = height.to_be_bytes();
+
+                // Add height -> header_id mapping
+                batch.put(columns::HEADER_CHAIN, height_key.to_vec(), key.to_vec());
+                count += 1;
+                max_height = max_height.max(height);
+
+                if count % 100000 == 0 {
+                    info!(count, current_height = height, "Rebuilding height index...");
+                }
+            }
+        }
+
+        // Write all updates in a single batch
+        if count > 0 {
+            self.storage.write_batch(batch)?;
+            info!(
+                count,
+                max_height,
+                "Height index rebuilt successfully"
+            );
+        } else {
+            warn!("No headers found to rebuild index from");
+        }
+
+        Ok(count)
+    }
+
     /// Get header IDs in a range without loading full headers.
     /// This is much more memory efficient for bulk operations.
     pub fn get_ids_range(&self, from_height: u32, count: u32) -> StateResult<Vec<BlockId>> {

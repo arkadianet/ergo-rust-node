@@ -538,7 +538,8 @@ impl Node {
                             // Request next batch of blocks starting from current UTXO height + 1
                             // Use large batch (512) to fill the download pipeline
                             let batch_size = 512.min(header_height - utxo_height) as u32;
-                            match state_for_router.get_headers(utxo_height + 1, batch_size) {
+                            let next_height = utxo_height + 1;
+                            match state_for_router.get_headers(next_height, batch_size) {
                                 Ok(headers) if !headers.is_empty() => {
                                     info!(
                                         utxo_height,
@@ -552,7 +553,36 @@ impl Node {
                                     }).await;
                                 }
                                 Ok(_) => {
-                                    debug!(utxo_height, header_height, "No headers found for block download");
+                                    // Height index appears corrupted - headers exist but height lookup fails
+                                    // Attempt automatic repair once
+                                    static REBUILD_ATTEMPTED: std::sync::atomic::AtomicBool =
+                                        std::sync::atomic::AtomicBool::new(false);
+
+                                    if !REBUILD_ATTEMPTED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                                        warn!(
+                                            utxo_height,
+                                            header_height,
+                                            next_height,
+                                            "Height index corrupted: get_headers({}) returned empty. Attempting automatic repair...",
+                                            next_height
+                                        );
+
+                                        // Try to rebuild the height index
+                                        match state_for_router.history.headers.rebuild_height_index() {
+                                            Ok(count) => {
+                                                info!(
+                                                    count,
+                                                    "Height index rebuilt successfully. Block sync should resume."
+                                                );
+                                            }
+                                            Err(e) => {
+                                                error!(
+                                                    error = %e,
+                                                    "Failed to rebuild height index. Manual intervention required."
+                                                );
+                                            }
+                                        }
+                                    }
                                 }
                                 Err(e) => {
                                     warn!(error = %e, "Failed to get headers for block sync check");
