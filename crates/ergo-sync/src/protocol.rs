@@ -1953,6 +1953,10 @@ impl SyncProtocol {
             self.flush_pending_headers_to_storage().await?;
         }
 
+        // Repair any orphaned download tasks (tasks with peer assigned but not in in_flight).
+        // This can happen due to race conditions and prevents downloads from getting stuck.
+        self.downloader.repair_orphaned_tasks();
+
         // Check for block download timeouts
         let timed_out = self.downloader.check_timeouts();
 

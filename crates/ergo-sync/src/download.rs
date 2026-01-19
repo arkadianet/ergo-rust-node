@@ -214,27 +214,45 @@ impl BlockDownloader {
     }
 
     /// Mark a task as dispatched to a peer.
+    /// Both pending and in_flight are updated atomically to prevent race conditions.
     pub fn dispatch(&self, id: &[u8], peer: PeerId) {
-        if let Some(mut task) = self.pending.write().get_mut(id) {
+        // Hold both locks simultaneously to prevent race conditions where
+        // fail/complete could run between updating pending and in_flight
+        let mut pending = self.pending.write();
+        let mut in_flight = self.in_flight.write();
+
+        if let Some(task) = pending.get_mut(id) {
             task.peer = Some(peer.clone());
             task.requested_at = Some(Instant::now());
         }
-        self.in_flight.write().insert(id.to_vec(), peer);
+        in_flight.insert(id.to_vec(), peer);
     }
 
     /// Mark a task as completed.
+    /// Uses consistent lock ordering (pending, in_flight) to prevent deadlocks.
     pub fn complete(&self, id: &[u8]) {
-        self.pending.write().remove(id);
-        self.in_flight.write().remove(id);
+        // Hold both locks to ensure atomic update
+        let mut pending = self.pending.write();
+        let mut in_flight = self.in_flight.write();
+
+        pending.remove(id);
+        in_flight.remove(id);
+        drop(pending);
+        drop(in_flight);
+
         self.completed.write().put(id.to_vec(), ());
         debug!(id = hex::encode(id), "Download completed");
     }
 
     /// Handle a failed download.
+    /// Uses consistent lock ordering (pending, in_flight) to prevent deadlocks.
     pub fn fail(&self, id: &[u8], peer: &PeerId) {
-        self.in_flight.write().remove(id);
-
+        // Hold both locks to ensure atomic update
         let mut pending = self.pending.write();
+        let mut in_flight = self.in_flight.write();
+
+        in_flight.remove(id);
+
         if let Some(task) = pending.get_mut(id) {
             task.retries += 1;
             task.peer = None;
@@ -249,9 +267,12 @@ impl BlockDownloader {
                     failed_peers = task.failed_peers.len(),
                     "Download failed permanently"
                 );
-                pending.remove(id);
+                let removed = pending.remove(id);
                 drop(pending);
-                self.failed.write().insert(id.to_vec());
+                drop(in_flight);
+                if removed.is_some() {
+                    self.failed.write().insert(id.to_vec());
+                }
             } else {
                 debug!(
                     id = hex::encode(id),
@@ -315,6 +336,41 @@ impl BlockDownloader {
             completed: self.completed.read().len(),
             failed: self.failed.read().len(),
         }
+    }
+
+    /// Detect and repair orphaned tasks - tasks that have peer assigned but are not in in_flight.
+    /// This can happen due to race conditions between dispatch and fail/complete.
+    /// Returns the number of tasks that were repaired.
+    pub fn repair_orphaned_tasks(&self) -> usize {
+        let in_flight = self.in_flight.read();
+        let mut pending = self.pending.write();
+        let mut repaired = 0;
+
+        for (id, task) in pending.iter_mut() {
+            // Task has peer assigned but is not in in_flight - this is an inconsistent state
+            if task.peer.is_some() && !in_flight.contains_key(id) {
+                debug!(
+                    id = hex::encode(id),
+                    peer = ?task.peer,
+                    retries = task.retries,
+                    "Repairing orphaned task - peer assigned but not in in_flight"
+                );
+                task.peer = None;
+                task.requested_at = None;
+                repaired += 1;
+            }
+        }
+
+        if repaired > 0 {
+            warn!(
+                repaired,
+                pending = pending.len(),
+                in_flight = in_flight.len(),
+                "Repaired orphaned download tasks"
+            );
+        }
+
+        repaired
     }
 
     /// Check if all downloads are complete.
